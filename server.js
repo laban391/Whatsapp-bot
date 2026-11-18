@@ -1,19 +1,59 @@
+'use strict';
+
+// ==========================================
+// GAAJU-XMD MULTI-USER WHATSAPP BOT
+// ==========================================
+
 const express = require('express');
 const mongoose = require('mongoose');
-const makeWASocket = require('@whiskeysockets/baileys').default;
-
-const {
-    useMultiFileAuthState,
-    DisconnectReason,
-    fetchLatestWaWebVersion,
-    makeCacheableSignalKeyStore,
-    Browsers,
-    normalizeMessageContent
-} = require('@whiskeysockets/baileys');
-
-const pino = require('pino');
 const fs = require('fs');
 const path = require('path');
+const pino = require('pino');
+const PhoneNumber = require('awesome-phonenumber');
+
+// ==========================================
+// ORIGINAL GAAJU-XMD FILES
+// ==========================================
+
+global.File = global.File || class File {};
+
+require('./settings');
+require('./config.js');
+
+const settings = require('./settings');
+
+const store = require('./lib/lightweight_store');
+
+const { smsg } = require('./lib/myfunc');
+
+const {
+    handleMessages,
+    handleGroupParticipantUpdate,
+    handleStatus
+} = require('./main');
+
+const {
+    handleStatusUpdate,
+    handleBulkStatusUpdate
+} = require('./commands/autostatus');
+
+const { storeMessage } = require('./commands/antidelete');
+
+const { handleAnticall } = require('./commands/anticall');
+
+// ==========================================
+// BAILEYS
+// ==========================================
+
+const {
+    default: makeWASocket,
+    useMultiFileAuthState,
+    DisconnectReason,
+    fetchLatestBaileysVersion,
+    makeCacheableSignalKeyStore,
+    Browsers,
+    jidDecode
+} = require('@whiskeysockets/baileys');
 
 // ==========================================
 // CONFIGURATION
@@ -27,20 +67,40 @@ const PORT = process.env.PORT || 3000;
 
 const MONGO_URI = process.env.MONGO_URI;
 
-const SESSION_DIR =
-    process.env.SESSION_DIR || './sessions';
+const SESSION_DIR = path.resolve(
+    process.env.SESSION_DIR || './sessions'
+);
+
+const logger = pino({
+    level: 'silent'
+});
 
 if (!MONGO_URI) {
-    throw new Error('MONGO_URI environment variable is missing.');
+    throw new Error(
+        'MONGO_URI environment variable is missing.'
+    );
 }
 
-const logger = pino({ level: 'silent' });
+// ==========================================
+// GLOBAL GAAJU-XMD SETTINGS
+// ==========================================
+
+global.packname = settings.packname;
+global.author = settings.author;
+global.botname = settings.botName || 'GAAJU-XMD';
+global.themeemoji = '🤖';
+
+global.channelLink =
+    'https://whatsapp.com/channel/0029VbBvGgyFsn0alyIDjw0z';
+
+global.ytch = settings.ytChannel || 'Xchristech';
 
 // ==========================================
 // DATABASE
 // ==========================================
 
 const SessionSchema = new mongoose.Schema({
+
     userId: {
         type: String,
         unique: true,
@@ -53,12 +113,14 @@ const SessionSchema = new mongoose.Schema({
         type: Boolean,
         default: false
     }
+
+}, {
+    timestamps: true
 });
 
-const UserSession = mongoose.model(
-    'UserSession',
-    SessionSchema
-);
+const UserSession =
+    mongoose.models.UserSession ||
+    mongoose.model('UserSession', SessionSchema);
 
 // ==========================================
 // ACTIVE BOTS
@@ -67,11 +129,10 @@ const UserSession = mongoose.model(
 const activeBots = new Map();
 
 // ==========================================
-// WEBSITE
+// PAIRING WEBSITE
 // ==========================================
 
-const htmlPage = `
-<!DOCTYPE html>
+const htmlPage = `<!DOCTYPE html>
 <html lang="en">
 
 <head>
@@ -90,7 +151,7 @@ content="width=device-width, initial-scale=1.0">
 }
 
 body {
-    font-family: 'Segoe UI', sans-serif;
+    font-family: Segoe UI, sans-serif;
     background: #121212;
     color: #fff;
 
@@ -113,7 +174,7 @@ body {
     max-width: 400px;
     width: 100%;
 
-    box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+    box-shadow: 0 4px 15px rgba(0,0,0,.5);
 }
 
 h1 {
@@ -152,7 +213,7 @@ button {
 }
 
 button:disabled {
-    opacity: 0.6;
+    opacity: .6;
 }
 
 .code-box {
@@ -201,7 +262,7 @@ Get Pairing Code
 <h2 id="code"></h2>
 
 <p style="font-size:12px">
-WhatsApp > Linked Devices > Link with phone number
+WhatsApp &gt; Linked Devices &gt; Link with phone number
 </p>
 
 </div>
@@ -212,13 +273,17 @@ WhatsApp > Linked Devices > Link with phone number
 
 async function pair() {
 
-    const num = document.getElementById('number').value.trim();
+    const num =
+        document.getElementById('number').value.trim();
 
-    const button = document.getElementById('pairBtn');
+    const button =
+        document.getElementById('pairBtn');
 
-    const result = document.getElementById('result');
+    const result =
+        document.getElementById('result');
 
-    const code = document.getElementById('code');
+    const code =
+        document.getElementById('code');
 
     if (!/^\\d{8,15}$/.test(num)) {
         return alert('Enter a valid phone number.');
@@ -266,150 +331,333 @@ async function pair() {
 </script>
 
 </body>
-</html>
-`;
+</html>`;
 
 // ==========================================
 // WEBSITE ROUTES
 // ==========================================
 
-app.get('/', (req, res) => {
+app.get('/', (_req, res) => {
     res.send(htmlPage);
 });
 
-app.get('/ping', (req, res) => {
+app.get('/ping', (_req, res) => {
     res.send('alive');
 });
 
 // ==========================================
-// MESSAGE TEXT EXTRACTION
+// STATUS CONFIGURATION
 // ==========================================
 
-function extractMessageText(message) {
+function readStatusConfig() {
 
-    if (!message) return '';
+    try {
 
-    const msg = normalizeMessageContent(message) || message;
+        const file = path.join(
+            __dirname,
+            'data',
+            'autostatus.json'
+        );
 
-    return (
-        msg.conversation ||
-        msg.extendedTextMessage?.text ||
-        msg.imageMessage?.caption ||
-        msg.videoMessage?.caption ||
-        msg.documentMessage?.caption ||
-        msg.buttonsResponseMessage?.selectedButtonId ||
-        msg.listResponseMessage?.singleSelectReply?.selectedRowId ||
-        msg.templateButtonReplyMessage?.selectedId ||
-        msg.interactiveResponseMessage?.body?.text ||
-        ''
-    );
+        if (fs.existsSync(file)) {
+
+            const data = JSON.parse(
+                fs.readFileSync(file, 'utf8')
+            );
+
+            return {
+                enabled: data.enabled === true,
+                likeOn: data.likeOn === true,
+                selfOn: data.selfOn === true
+            };
+
+        }
+
+    } catch (error) {
+
+        console.error(
+            'Status config read error:',
+            error.message
+        );
+
+    }
+
+    return {
+        enabled: false,
+        likeOn: false,
+        selfOn: false
+    };
+
 }
 
 // ==========================================
-// BOT COMMANDS
+// SOCKET HELPERS
 // ==========================================
 
-function registerCommands(sock, phoneNumber) {
+function attachSocketHelpers(sock) {
 
-    sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    sock.decodeJid = (jid) => {
 
-        if (type !== 'notify') return;
+        if (!jid) return jid;
 
-        for (const m of messages) {
+        if (/:[0-9]+@/i.test(jid)) {
 
-            if (!m.message) continue;
+            const decoded = jidDecode(jid) || {};
 
-            if (m.key.remoteJid === 'status@broadcast') continue;
+            return decoded.user && decoded.server
+                ? `${decoded.user}@${decoded.server}`
+                : jid;
+
+        }
+
+        return jid;
+
+    };
+
+    sock.getName = (
+        jid,
+        withoutContact = false
+    ) => {
+
+        const id = sock.decodeJid(jid);
+
+        const contact = store.contacts?.[id] || {};
+
+        if (id?.endsWith('@g.us')) {
+
+            const group = store.chats?.[id] || {};
+
+            return group.subject || contact.name || id;
+
+        }
+
+        if (id === '0@s.whatsapp.net') {
+            return 'WhatsApp';
+        }
+
+        if (id === sock.decodeJid(sock.user?.id)) {
+
+            return sock.user?.name ||
+                sock.user?.verifiedName ||
+                id;
+
+        }
+
+        if (
+            !withoutContact &&
+            (
+                contact.name ||
+                contact.notify ||
+                contact.verifiedName
+            )
+        ) {
+
+            return contact.name ||
+                contact.notify ||
+                contact.verifiedName;
+
+        }
+
+        const number = String(id || '')
+            .split('@')[0]
+            .split(':')[0];
+
+        try {
+
+            return new PhoneNumber(`+${number}`)
+                .getNumber('international') || number;
+
+        } catch (_) {
+
+            return number;
+
+        }
+
+    };
+
+    sock.serializeM = (message) => {
+        return smsg(sock, message, store);
+    };
+
+    sock.public = true;
+
+}
+
+// ==========================================
+// BOT EVENT HANDLERS
+// ==========================================
+
+function bindBotEvents(sock, bot) {
+
+    try {
+
+        store.bind(sock.ev);
+
+    } catch (error) {
+
+        console.error(
+            'Store bind warning:',
+            error.message
+        );
+
+    }
+
+    // CONTACT UPDATES
+
+    sock.ev.on('contacts.update', updates => {
+
+        for (const contact of updates || []) {
+
+            const id = sock.decodeJid(contact.id);
+
+            if (id && store.contacts) {
+
+                store.contacts[id] = {
+                    id,
+                    name: contact.notify || contact.name
+                };
+
+            }
+
+        }
+
+    });
+
+    // MESSAGE HANDLER
+
+    sock.ev.on('messages.upsert', async update => {
+
+        try {
+
+            if (!update?.messages?.length) return;
+
+            for (const message of update.messages) {
+
+                if (!message?.message) continue;
+
+                const jid = message.key?.remoteJid;
+
+                if (jid === 'status@broadcast') {
+
+                    if (!message.key.fromMe) {
+
+                        try {
+
+                            storeMessage(sock, message);
+
+                        } catch (_) {}
+
+                        const statusConfig =
+                            readStatusConfig();
+
+                        if (statusConfig.enabled) {
+
+                            handleStatusUpdate(
+                                sock,
+                                {
+                                    messages: [message],
+                                    type: update.type
+                                }
+                            ).catch(() => {});
+
+                        }
+
+                    }
+
+                    continue;
+
+                }
+
+            }
+
+            // ORIGINAL GAAJU-XMD COMMAND HANDLER
+
+            await handleMessages(
+                sock,
+                update,
+                true
+            );
+
+            if (update.messages.length > 1) {
+
+                const statusMessages =
+                    update.messages.filter(m =>
+                        m?.key?.remoteJid === 'status@broadcast' &&
+                        !m.key.fromMe &&
+                        m.key.participant
+                    );
+
+                if (statusMessages.length) {
+
+                    const statusConfig =
+                        readStatusConfig();
+
+                    if (statusConfig.enabled) {
+
+                        handleBulkStatusUpdate(
+                            sock,
+                            statusMessages
+                        ).catch(() => {});
+
+                    }
+
+                }
+
+            }
+
+        } catch (error) {
+
+            console.error(
+                `[${bot.phoneNumber}] MESSAGE HANDLER ERROR:`,
+                error.stack || error.message
+            );
+
+        }
+
+    });
+
+    // GROUP PARTICIPANTS
+
+    sock.ev.on(
+        'group-participants.update',
+        async update => {
 
             try {
 
-                const text = extractMessageText(m.message);
-
-                if (!text) continue;
-
-                const body = text.trim();
-
-                if (!body.startsWith('.')) continue;
-
-                const args = body
-                    .slice(1)
-                    .trim()
-                    .split(/\s+/);
-
-                const command = args.shift()?.toLowerCase();
-
-                if (!command) continue;
-
-                const from = m.key.remoteJid;
-
-                if (!from) continue;
-
-                console.log(
-                    `📩 Command received: .${command} from ${from}`
+                await handleGroupParticipantUpdate(
+                    sock,
+                    update
                 );
-
-                const reply = async (message) => {
-
-                    await sock.sendMessage(
-                        from,
-                        { text: message },
-                        { quoted: m }
-                    );
-
-                };
-
-                // MENU
-
-                if (command === 'menu') {
-
-                    const menuText = `
-╭━━━〔 MULTI-USER BOT 〕━━━╮
-
-┃
-┃ ▢ Botname: Multi-User Bot
-┃ ▢ Connected as: ${phoneNumber}
-┃
-┣━━━〔 COMMAND MENU 〕━━━
-┃
-┃ .menu
-┃ .ping
-┃ .owner
-┃
-╰━━━━━━━━━━━━━━━━━━╯
-`;
-
-                    await reply(menuText);
-
-                }
-
-                // PING
-
-                else if (command === 'ping') {
-
-                    await reply(
-                        '🏓 Pong! Your bot is active.'
-                    );
-
-                }
-
-                // OWNER
-
-                else if (command === 'owner') {
-
-                    await reply(
-                        '👤 Owner: +254708700675'
-                    );
-
-                }
 
             } catch (error) {
 
                 console.error(
-                    '❌ COMMAND ERROR:',
-                    error.stack || error.message
+                    `[${bot.phoneNumber}] GROUP EVENT ERROR:`,
+                    error.message
                 );
 
             }
+
+        }
+    );
+
+    // ANTICALL
+
+    sock.ev.on('call', async calls => {
+
+        try {
+
+            await handleAnticall(
+                sock,
+                calls
+            );
+
+        } catch (error) {
+
+            console.error(
+                `[${bot.phoneNumber}] CALL HANDLER ERROR:`,
+                error.message
+            );
 
         }
 
@@ -421,33 +669,23 @@ function registerCommands(sock, phoneNumber) {
 // SOCKET CONNECTION
 // ==========================================
 
-async function connectSocket(bot, onPairingCode = null) {
+async function connectSocket(
+    bot,
+    onPairingCode = null
+) {
 
     if (bot.stopped) return;
 
-    const { state, saveCreds } =
-        await useMultiFileAuthState(bot.sessionPath);
+    const {
+        state,
+        saveCreds
+    } = await useMultiFileAuthState(
+        bot.sessionPath
+    );
 
-    let version;
-
-    try {
-
-        const result = await fetchLatestWaWebVersion();
-
-        version = result.version;
-
-        console.log(
-            'Using WhatsApp Web version:',
-            version
-        );
-
-    } catch (error) {
-
-        throw new Error(
-            'Version fetch failed: ' + error.message
-        );
-
-    }
+    const {
+        version
+    } = await fetchLatestBaileysVersion();
 
     if (bot.stopped) return;
 
@@ -456,12 +694,14 @@ async function connectSocket(bot, onPairingCode = null) {
         version,
 
         auth: {
+
             creds: state.creds,
 
             keys: makeCacheableSignalKeyStore(
                 state.keys,
                 logger
             )
+
         },
 
         logger,
@@ -472,11 +712,32 @@ async function connectSocket(bot, onPairingCode = null) {
 
         syncFullHistory: false,
 
+        markOnlineOnConnect: false,
+
         connectTimeoutMs: 60000,
 
         keepAliveIntervalMs: 30000,
 
-        markOnlineOnConnect: false
+        defaultQueryTimeoutMs: 60000,
+
+        getMessage: async key => {
+
+            try {
+
+                const saved = await store.loadMessage(
+                    key.remoteJid,
+                    key.id
+                );
+
+                return saved?.message || undefined;
+
+            } catch (_) {
+
+                return undefined;
+
+            }
+
+        }
 
     });
 
@@ -484,22 +745,22 @@ async function connectSocket(bot, onPairingCode = null) {
 
     bot.reconnecting = false;
 
-    let pairingRequested = false;
-    let connectionClosed = false;
+    bot.connectionClosed = false;
 
-    // SAVE CREDENTIALS
+    attachSocketHelpers(sock);
 
     sock.ev.on('creds.update', saveCreds);
 
-    // REGISTER COMMANDS
-
-    registerCommands(sock, bot.phoneNumber);
+    bindBotEvents(sock, bot);
 
     // ======================================
     // PAIRING CODE
     // ======================================
 
-    if (!state.creds.registered && onPairingCode) {
+    if (
+        !state.creds.registered &&
+        onPairingCode
+    ) {
 
         bot.pairingTimer = setTimeout(async () => {
 
@@ -507,15 +768,14 @@ async function connectSocket(bot, onPairingCode = null) {
 
                 if (
                     bot.stopped ||
-                    pairingRequested ||
+                    bot.pairingRequested ||
                     state.creds.registered
                 ) return;
 
-                pairingRequested = true;
+                bot.pairingRequested = true;
 
                 console.log(
-                    '🔑 Requesting pairing code:',
-                    bot.phoneNumber
+                    `🔑 Requesting pairing code: ${bot.phoneNumber}`
                 );
 
                 const code = await sock.requestPairingCode(
@@ -523,8 +783,7 @@ async function connectSocket(bot, onPairingCode = null) {
                 );
 
                 console.log(
-                    '✅ Pairing code generated:',
-                    bot.phoneNumber
+                    `✅ Pairing code generated: ${bot.phoneNumber}`
                 );
 
                 onPairingCode(null, code);
@@ -533,7 +792,7 @@ async function connectSocket(bot, onPairingCode = null) {
 
                 console.error(
                     '❌ PAIRING ERROR:',
-                    error.message
+                    error.stack || error.message
                 );
 
                 onPairingCode(error);
@@ -548,7 +807,7 @@ async function connectSocket(bot, onPairingCode = null) {
     // CONNECTION UPDATE
     // ======================================
 
-    sock.ev.on('connection.update', async (update) => {
+    sock.ev.on('connection.update', async update => {
 
         const {
             connection,
@@ -558,8 +817,7 @@ async function connectSocket(bot, onPairingCode = null) {
         if (connection === 'connecting') {
 
             console.log(
-                '🔄 Connecting:',
-                bot.phoneNumber
+                `🔄 Connecting: ${bot.phoneNumber}`
             );
 
         }
@@ -569,29 +827,62 @@ async function connectSocket(bot, onPairingCode = null) {
         if (connection === 'open') {
 
             console.log(
-                '✅ WhatsApp connected:',
-                bot.phoneNumber
+                `✅ WhatsApp connected: ${bot.phoneNumber}`
             );
+
+            bot.reconnecting = false;
 
             try {
 
                 await UserSession.findOneAndUpdate(
 
-                    { userId: bot.userId },
+                    {
+                        userId: bot.userId
+                    },
 
                     {
                         phoneNumber: bot.phoneNumber,
                         isConnected: true
                     },
 
-                    { upsert: true }
+                    {
+                        upsert: true,
+                        new: true
+                    }
 
                 );
 
             } catch (error) {
 
                 console.error(
-                    'DATABASE ERROR:',
+                    'DATABASE CONNECTED UPDATE ERROR:',
+                    error.message
+                );
+
+            }
+
+            try {
+
+                const groups =
+                    await sock.groupFetchAllParticipating();
+
+                for (const group of Object.values(groups || {})) {
+
+                    if (store.chats) {
+
+                        store.chats[group.id] = {
+                            id: group.id,
+                            ...group
+                        };
+
+                    }
+
+                }
+
+            } catch (error) {
+
+                console.error(
+                    `[${bot.phoneNumber}] GROUP CACHE ERROR:`,
                     error.message
                 );
 
@@ -603,9 +894,9 @@ async function connectSocket(bot, onPairingCode = null) {
 
         if (connection === 'close') {
 
-            if (connectionClosed) return;
+            if (bot.connectionClosed) return;
 
-            connectionClosed = true;
+            bot.connectionClosed = true;
 
             const statusCode =
                 lastDisconnect?.error?.output?.statusCode;
@@ -615,40 +906,40 @@ async function connectSocket(bot, onPairingCode = null) {
                 'Unknown error';
 
             console.log(
-                '❌ Connection closed:',
-                bot.phoneNumber,
-                statusCode,
-                errorMessage
+                `❌ Connection closed: ${bot.phoneNumber} | ${statusCode || 'no status'} | ${errorMessage}`
             );
 
             try {
 
                 await UserSession.findOneAndUpdate(
 
-                    { userId: bot.userId },
+                    {
+                        userId: bot.userId
+                    },
 
-                    { isConnected: false }
+                    {
+                        isConnected: false
+                    }
 
                 );
 
             } catch (error) {
 
                 console.error(
-                    'DATABASE UPDATE ERROR:',
+                    'DATABASE DISCONNECT UPDATE ERROR:',
                     error.message
                 );
 
             }
 
-            // LOGGED OUT
+            // ONLY REAL LOGOUT CLEARS CREDENTIALS
 
             if (
                 statusCode === DisconnectReason.loggedOut
             ) {
 
                 console.log(
-                    '🚪 User logged out:',
-                    bot.phoneNumber
+                    `🚪 User logged out: ${bot.phoneNumber}`
                 );
 
                 bot.stopped = true;
@@ -661,8 +952,12 @@ async function connectSocket(bot, onPairingCode = null) {
                     clearTimeout(bot.reconnectTimer);
                 }
 
-                if (activeBots.get(bot.userId) === bot) {
+                if (
+                    activeBots.get(bot.userId) === bot
+                ) {
+
                     activeBots.delete(bot.userId);
+
                 }
 
                 try {
@@ -673,11 +968,6 @@ async function connectSocket(bot, onPairingCode = null) {
                             recursive: true,
                             force: true
                         }
-                    );
-
-                    console.log(
-                        '🧹 Invalid session cleared:',
-                        bot.phoneNumber
                     );
 
                 } catch (error) {
@@ -703,7 +993,7 @@ async function connectSocket(bot, onPairingCode = null) {
 
             }
 
-            // RECONNECT
+            // RECONNECT OTHER DISCONNECTIONS
 
             if (!bot.stopped) {
 
@@ -732,25 +1022,30 @@ function scheduleReconnect(bot) {
     bot.reconnecting = true;
 
     console.log(
-        '🔄 Reconnecting:',
-        bot.phoneNumber
+        `🔄 Reconnecting: ${bot.phoneNumber}`
     );
 
     bot.reconnectTimer = setTimeout(async () => {
 
         bot.reconnectTimer = null;
 
-        try {
+        if (bot.stopped) {
 
-            if (bot.stopped) return;
+            bot.reconnecting = false;
+
+            return;
+
+        }
+
+        try {
 
             await connectSocket(bot, null);
 
         } catch (error) {
 
             console.error(
-                'RECONNECTION ERROR:',
-                error.message
+                `[${bot.phoneNumber}] RECONNECTION ERROR:`,
+                error.stack || error.message
             );
 
             bot.reconnecting = false;
@@ -788,7 +1083,9 @@ async function startBot(
 
     await fs.promises.mkdir(
         sessionPath,
-        { recursive: true }
+        {
+            recursive: true
+        }
     );
 
     const bot = {
@@ -807,7 +1104,11 @@ async function startBot(
 
         reconnectTimer: null,
 
-        pairingTimer: null
+        pairingTimer: null,
+
+        pairingRequested: false,
+
+        connectionClosed: false
 
     };
 
@@ -826,7 +1127,9 @@ async function startBot(
 
         bot.stopped = true;
 
-        activeBots.delete(userId);
+        if (activeBots.get(userId) === bot) {
+            activeBots.delete(userId);
+        }
 
         throw error;
 
@@ -840,30 +1143,22 @@ async function startBot(
 
 app.get('/pair', async (req, res) => {
 
-    let phoneNumber = req.query.number;
-
-    if (!phoneNumber) {
-
-        return res.status(400).json({
-            error: 'Please provide a phone number.'
-        });
-
-    }
-
-    phoneNumber = String(phoneNumber).replace(
-        /[^0-9]/g,
-        ''
-    );
+    let phoneNumber = String(
+        req.query.number || ''
+    ).replace(/[^0-9]/g, '');
 
     if (!/^[0-9]{8,15}$/.test(phoneNumber)) {
 
         return res.status(400).json({
-            error: 'Invalid phone number.'
+
+            error:
+                'Please enter a valid phone number with country code.'
+
         });
 
     }
 
-    const userId = 'user_' + phoneNumber;
+    const userId = `user_${phoneNumber}`;
 
     const sessionPath = path.join(
         SESSION_DIR,
@@ -883,7 +1178,10 @@ app.get('/pair', async (req, res) => {
         if (activeBots.has(userId)) {
 
             return res.status(409).json({
-                error: 'This number already has an active bot.'
+
+                error:
+                    'This number already has an active bot.'
+
             });
 
         }
@@ -892,13 +1190,19 @@ app.get('/pair', async (req, res) => {
 
         if (fs.existsSync(sessionPath)) {
 
-            const { state } =
-                await useMultiFileAuthState(sessionPath);
+            const {
+                state
+            } = await useMultiFileAuthState(
+                sessionPath
+            );
 
             if (state.creds.registered) {
 
                 return res.status(409).json({
-                    error: 'An existing session was found. If the device was unlinked, wait for logout detection before pairing again.'
+
+                    error:
+                        'An existing WhatsApp session was found. Unlink the old device and wait for WhatsApp logout detection, or remove that session folder before pairing again.'
+
                 });
 
             }
@@ -924,21 +1228,30 @@ app.get('/pair', async (req, res) => {
                 }
 
                 if (bot.sock) {
+
                     try {
+
                         bot.sock.end(
                             new Error('Pairing timed out')
                         );
+
                     } catch (_) {}
+
                 }
 
-                activeBots.delete(userId);
+                if (activeBots.get(userId) === bot) {
+                    activeBots.delete(userId);
+                }
 
             }
 
             if (!res.headersSent) {
 
                 res.status(504).json({
-                    error: 'Pairing timed out. Check Render logs.'
+
+                    error:
+                        'Pairing timed out. Check the server logs and try again.'
+
                 });
 
             }
@@ -956,13 +1269,17 @@ app.get('/pair', async (req, res) => {
             if (error) {
 
                 return res.status(500).json({
+
                     error: error.message
+
                 });
 
             }
 
-            res.json({
+            return res.json({
+
                 code
+
             });
 
         };
@@ -982,8 +1299,10 @@ app.get('/pair', async (req, res) => {
 
         if (!res.headersSent) {
 
-            res.status(500).json({
+            return res.status(500).json({
+
                 error: error.message
+
             });
 
         }
@@ -1004,23 +1323,30 @@ async function restoreSessions() {
 
     await fs.promises.mkdir(
         SESSION_DIR,
-        { recursive: true }
+        {
+            recursive: true
+        }
     );
 
     const folders = await fs.promises.readdir(
         SESSION_DIR,
-        { withFileTypes: true }
+        {
+            withFileTypes: true
+        }
     );
 
     for (const folder of folders) {
 
-        if (!folder.isDirectory()) continue;
-
-        if (!folder.name.startsWith('user_')) continue;
+        if (
+            !folder.isDirectory() ||
+            !folder.name.startsWith('user_')
+        ) continue;
 
         const phoneNumber = folder.name.slice(5);
 
-        if (!/^[0-9]{8,15}$/.test(phoneNumber)) continue;
+        if (!/^[0-9]{8,15}$/.test(phoneNumber)) {
+            continue;
+        }
 
         try {
 
@@ -1031,14 +1357,16 @@ async function restoreSessions() {
                 userId
             );
 
-            const { state } =
-                await useMultiFileAuthState(sessionPath);
+            const {
+                state
+            } = await useMultiFileAuthState(
+                sessionPath
+            );
 
             if (!state.creds.registered) continue;
 
             console.log(
-                '♻️ Restoring:',
-                phoneNumber
+                `♻️ Restoring: ${phoneNumber}`
             );
 
             await startBot(
@@ -1050,15 +1378,17 @@ async function restoreSessions() {
         } catch (error) {
 
             console.error(
-                'RESTORE ERROR:',
-                phoneNumber,
-                error.message
+                `RESTORE ERROR (${phoneNumber}):`,
+                error.stack || error.message
             );
 
         }
 
         // Avoid opening too many sockets simultaneously
-        await new Promise(resolve => setTimeout(resolve, 2000));
+
+        await new Promise(resolve => {
+            setTimeout(resolve, 2000);
+        });
 
     }
 
@@ -1080,33 +1410,45 @@ async function startServer() {
 
         await fs.promises.mkdir(
             SESSION_DIR,
-            { recursive: true }
+            {
+                recursive: true
+            }
         );
 
-        const server = app.listen(PORT, () => {
+        const server = app.listen(
+            PORT,
+            () => {
 
-            console.log(
-                `🌐 Server running on port ${PORT}`
-            );
-
-            restoreSessions().catch(error => {
-                console.error(
-                    'RESTORE ERROR:',
-                    error.message
+                console.log(
+                    `🌐 Server running on port ${PORT}`
                 );
-            });
 
-        });
+                restoreSessions().catch(error => {
+
+                    console.error(
+                        'RESTORE ERROR:',
+                        error.stack || error.message
+                    );
+
+                });
+
+            }
+        );
 
         server.on('error', error => {
-            console.error('SERVER ERROR:', error);
+
+            console.error(
+                'SERVER ERROR:',
+                error
+            );
+
         });
 
     } catch (error) {
 
         console.error(
             '❌ SERVER START ERROR:',
-            error
+            error.stack || error.message
         );
 
         process.exit(1);
@@ -1114,5 +1456,87 @@ async function startServer() {
     }
 
 }
+
+// ==========================================
+// SHUTDOWN
+// ==========================================
+
+process.on('SIGINT', async () => {
+
+    console.log(
+        '🛑 Shutting down all WhatsApp sessions...'
+    );
+
+    for (const bot of activeBots.values()) {
+
+        bot.stopped = true;
+
+        if (bot.reconnectTimer) {
+            clearTimeout(bot.reconnectTimer);
+        }
+
+        if (bot.pairingTimer) {
+            clearTimeout(bot.pairingTimer);
+        }
+
+        try {
+
+            bot.sock?.end(
+                new Error('Server shutting down')
+            );
+
+        } catch (_) {}
+
+    }
+
+    try {
+
+        require('./commands/autorecord')
+            .stopAllInfiniteRecordings();
+
+    } catch (_) {}
+
+    try {
+
+        require('./commands/autotyping')
+            .stopAllInfiniteTyping();
+
+    } catch (_) {}
+
+    try {
+
+        await mongoose.disconnect();
+
+    } catch (_) {}
+
+    process.exit(0);
+
+});
+
+// ==========================================
+// ERROR HANDLING
+// ==========================================
+
+process.on('unhandledRejection', reason => {
+
+    console.error(
+        'UNHANDLED REJECTION:',
+        reason
+    );
+
+});
+
+process.on('uncaughtException', error => {
+
+    console.error(
+        'UNCAUGHT EXCEPTION:',
+        error
+    );
+
+});
+
+// ==========================================
+// RUN SERVER
+// ==========================================
 
 startServer();
