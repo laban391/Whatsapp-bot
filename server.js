@@ -1,8 +1,7 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const makeWASocket = require('@whiskeysockets/baileys').default;
-// FIX: Use fetchLatestWaWebVersion instead of fetchLatestBaileysVersion
-const { useMultiFileAuthState, DisconnectReason, fetchLatestWaWebVersion } = require('@whiskeysockets/baileys');
+const { useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, makeCacheableSignalKeyStore, Browsers, delay } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const fs = require('fs');
 const path = require('path');
@@ -119,26 +118,34 @@ app.get('/pair', async (req, res) => {
 
     const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
     
-    // FIX: Use fetchLatestWaWebVersion for the current version
-    const { version } = await fetchLatestWaWebVersion();
+    // --- THE FIX: Use the version and browser settings from your working script ---
+    const { version } = await fetchLatestBaileysVersion();
 
     const sock = makeWASocket({
         version,
-        auth: state,
-        logger: pino({ level: 'silent' }),
+        auth: {
+            creds: state.creds,
+            keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" }).child({ level: "fatal" })),
+        },
+        logger: pino({ level: "silent" }),
         printQRInTerminal: false,
-        browser: ["Ubuntu", "Chrome", "20.0.00"]
+        browser: Browsers.macOS("Safari"), // Spoofs a Mac to bypass blocks
+        syncFullHistory: false,
+        connectTimeoutMs: 60000,
+        keepAliveIntervalMs: 30000
     });
 
     activeBots.set(userId, sock);
 
+    sock.ev.on('creds.update', saveCreds);
+
     sock.ev.on('connection.update', async (update) => {
         const { qr, connection, lastDisconnect } = update;
 
-        // FIX: Wait for QR event, then wait 2 seconds before requesting code
         if (qr && !sock.authState.creds.registered) {
             try {
-                await new Promise(resolve => setTimeout(resolve, 2000));
+                // Add the delay from your working script
+                await delay(1500); 
                 const code = await sock.requestPairingCode(phoneNumber);
                 res.json({ code: code });
             } catch (e) {
@@ -167,8 +174,6 @@ app.get('/pair', async (req, res) => {
             }
         }
     });
-
-    sock.ev.on('creds.update', saveCreds);
 
     // --- 5. MESSAGE HANDLER ---
     sock.ev.on('messages.upsert', async ({ messages }) => {
