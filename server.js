@@ -10,6 +10,7 @@ const app = express();
 app.use(express.json());
 
 // --- 1. CONNECT TO DATABASE ---
+// Make sure your password is lowercase/numbers only to avoid auth errors
 const MONGO_URI = 'mongodb+srv://labanlaby34_db_user:labanlabanlaban@whatsapp.xv0gpkv.mongodb.net/?retryWrites=true&w=majority';
 
 mongoose.connect(MONGO_URI)
@@ -24,10 +25,9 @@ const SessionSchema = new mongoose.Schema({
 });
 const UserSession = mongoose.model('UserSession', SessionSchema);
 
-// Keep track of active bots in memory
 const activeBots = new Map();
 
-// --- 3. BEAUTIFUL FRONTEND HTML ---
+// --- 3. FRONTEND HTML ---
 const htmlPage = `
 <!DOCTYPE html>
 <html lang="en">
@@ -107,13 +107,11 @@ app.get('/pair', async (req, res) => {
 
     const userId = 'user_' + phoneNumber;
 
-    // Check if user already exists in DB and is connected
     let dbUser = await UserSession.findOne({ userId });
     if (dbUser && dbUser.isConnected && activeBots.has(userId)) {
         return res.json({ error: '❌ This number is already connected and running!' });
     }
 
-    // Set up a session folder for this user
     const sessionPath = `./sessions/${userId}`;
     if (!fs.existsSync(sessionPath)) {
         fs.mkdirSync(sessionPath, { recursive: true });
@@ -130,66 +128,65 @@ app.get('/pair', async (req, res) => {
         browser: ["Ubuntu", "Chrome", "20.0.00"]
     });
 
-    try {
-        // Request the pairing code
-        const code = await sock.requestPairingCode(phoneNumber);
+    activeBots.set(userId, sock);
+
+    // --- THE FIX: Wait for QR event to request code ---
+    sock.ev.on('connection.update', async (update) => {
+        const { qr, connection, lastDisconnect } = update;
+
+        // Only ask for the pairing code when the socket is ready (QR event fires)
+        if (qr && !sock.authState.creds.registered) {
+            try {
+                const code = await sock.requestPairingCode(phoneNumber);
+                res.json({ code: code });
+            } catch (e) {
+                res.status(500).json({ error: 'Error generating code: ' + e.message });
+            }
+        }
+
+        if (connection === 'open') {
+            console.log(`✅ User ${phoneNumber} connected!`);
+            await UserSession.findOneAndUpdate(
+                { userId },
+                { phoneNumber, isConnected: true },
+                { upsert: true }
+            );
+        }
+
+        if (connection === 'close') {
+            const statusCode = lastDisconnect?.error?.output?.statusCode;
+            if (statusCode !== DisconnectReason.loggedOut) {
+                console.log(`🔄 Reconnecting user ${phoneNumber}...`);
+                activeBots.delete(userId);
+            } else {
+                console.log(`❌ User ${phoneNumber} logged out.`);
+                await UserSession.findOneAndUpdate({ userId }, { isConnected: false });
+                activeBots.delete(userId);
+            }
+        }
+    });
+
+    sock.ev.on('creds.update', saveCreds);
+
+    // --- 5. MESSAGE HANDLER ---
+    sock.ev.on('messages.upsert', async ({ messages }) => {
+        const m = messages[0];
+        if (!m.message || m.key.fromMe) return;
+
+        const text = m.message.conversation || m.message.extendedTextMessage?.text || '';
+        const from = m.key.remoteJid;
+
+        if (text === '.menu') {
+            let menu = `🤖 *Bot Menu*\n\n`;
+            menu += `▢ .menu\n▢ .ping\n\n`;
+            menu += `Connected as: ${phoneNumber}`;
+            await sock.sendMessage(from, { text: menu }, { quoted: m });
+        }
         
-        // Save to our active bots map
-        activeBots.set(userId, sock);
-
-        // Send the code to the frontend immediately
-        res.json({ code: code });
-
-        // Listen for connection updates
-        sock.ev.on('connection.update', async (update) => {
-            const { connection, lastDisconnect } = update;
-            
-            if (connection === 'open') {
-                console.log(`✅ User ${phoneNumber} connected!`);
-                await UserSession.findOneAndUpdate(
-                    { userId },
-                    { phoneNumber, isConnected: true },
-                    { upsert: true }
-                );
-            }
-            
-            if (connection === 'close') {
-                const statusCode = lastDisconnect?.error?.output?.statusCode;
-                if (statusCode !== DisconnectReason.loggedOut) {
-                    console.log(`🔄 Reconnecting user ${phoneNumber}...`);
-                    activeBots.delete(userId);
-                } else {
-                    console.log(`❌ User ${phoneNumber} logged out.`);
-                    await UserSession.findOneAndUpdate({ userId }, { isConnected: false });
-                    activeBots.delete(userId);
-                }
-            }
-        });
-
-        // --- 5. MESSAGE HANDLER ---
-        sock.ev.on('messages.upsert', async ({ messages }) => {
-            const m = messages[0];
-            if (!m.message || m.key.fromMe) return;
-
-            const text = m.message.conversation || m.message.extendedMessage?.text || '';
-            const from = m.key.remoteJid;
-
-            if (text === '.menu') {
-                let menu = `🤖 *Bot Menu*\n\n`;
-                menu += `▢ .menu\n▢ .ping\n▢ .owner\n\n`;
-                menu += `Connected as: ${phoneNumber}`;
-                await sock.sendMessage(from, { text: menu }, { quoted: m });
-            }
-            
-            if (text === '.ping') {
-                await sock.sendMessage(from, { text: '🏓 Pong! Your bot is active.' }, { quoted: m });
-            }
-        });
-
-    } catch (e) {
-        console.error('❌ Pairing Error:', e);
-        res.status(500).json({ error: 'Error generating code: ' + e.message });
-    }
+        if (text === '.ping') {
+            await sock.sendMessage(from, { text: '🏓 Pong! Your bot is active.' }, { quoted: m });
+        }
+    });
 });
 
 // Start the website
