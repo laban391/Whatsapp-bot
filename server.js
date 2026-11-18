@@ -10,11 +10,11 @@ const app = express();
 app.use(express.json());
 
 // --- 1. CONNECT TO DATABASE ---
-// REPLACE THIS WITH YOUR ACTUAL MONGODB STRING
-const MONGO_URI = 'mongodb+srv://admin:YourPassword123@whatsapp.xv0gpkv.mongodb.net/?retryWrites=true&w=majority';
+const MONGO_URI = 'mongodb+srv://labanlaby34_db_user:XBeNLG0PiA9bYscr@whatsapp.xv0gpkv.mongodb.net/?retryWrites=true&w=majority';
+
 mongoose.connect(MONGO_URI)
   .then(() => console.log('✅ Connected to MongoDB'))
-  .catch(err => console.log('❌ MongoDB Connection Error:', err));
+  .catch(err => console.log('❌ MongoDB Connection Error:', err.message));
 
 // --- 2. DATABASE MODEL ---
 const SessionSchema = new mongoose.Schema({
@@ -88,7 +88,7 @@ const htmlPage = `
             } catch (err) {
                 document.getElementById('loader').style.display = 'none';
                 document.querySelector('button').style.display = 'block';
-                alert('Connection failed. Try again.');
+                alert('Connection failed. Check server logs.');
             }
         }
     </script>
@@ -109,11 +109,8 @@ app.get('/pair', async (req, res) => {
 
     // Check if user already exists in DB and is connected
     let dbUser = await UserSession.findOne({ userId });
-    if (dbUser && dbUser.isConnected) {
-        // If the bot is actually active in memory, tell them it's already connected
-        if (activeBots.has(userId)) {
-            return res.json({ error: '❌ This number is already connected and running!' });
-        }
+    if (dbUser && dbUser.isConnected && activeBots.has(userId)) {
+        return res.json({ error: '❌ This number is already connected and running!' });
     }
 
     // Set up a session folder for this user
@@ -160,7 +157,6 @@ app.get('/pair', async (req, res) => {
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
                 if (statusCode !== DisconnectReason.loggedOut) {
                     console.log(`🔄 Reconnecting user ${phoneNumber}...`);
-                    // Reconnect logic by calling a function (you'd typically abstract this)
                     activeBots.delete(userId);
                 } else {
                     console.log(`❌ User ${phoneNumber} logged out.`);
@@ -175,7 +171,7 @@ app.get('/pair', async (req, res) => {
             const m = messages[0];
             if (!m.message || m.key.fromMe) return;
 
-            const text = m.message.conversation || m.message.extendedTextMessage?.text || '';
+            const text = m.message.conversation || m.message.extendedMessage?.text || '';
             const from = m.key.remoteJid;
 
             if (text === '.menu') {
@@ -191,6 +187,7 @@ app.get('/pair', async (req, res) => {
         });
 
     } catch (e) {
+        console.error('❌ Pairing Error:', e);
         res.status(500).json({ error: 'Error generating code: ' + e.message });
     }
 });
