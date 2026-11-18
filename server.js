@@ -15,31 +15,23 @@ const fs = require('fs');
 const path = require('path');
 
 const app = express();
+
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
 const MONGO_URI = process.env.MONGO_URI;
 
-// Use Render persistent disk for SESSION_DIR.
-// Example mount path: /var/data
-const SESSION_DIR = process.env.SESSION_DIR || './sessions';
+const SESSION_DIR =
+    process.env.SESSION_DIR || './sessions';
 
 if (!MONGO_URI) {
     throw new Error('MONGO_URI environment variable is missing.');
 }
 
-// ===============================
-// 1. DATABASE
-// ===============================
-
-mongoose.connect(MONGO_URI)
-    .then(() => {
-        console.log('✅ Connected to MongoDB');
-    })
-    .catch(err => {
-        console.error('❌ MongoDB Error:', err.message);
-    });
+// ==========================================
+// 1. DATABASE CONNECTION
+// ==========================================
 
 const SessionSchema = new mongoose.Schema({
     userId: {
@@ -61,21 +53,26 @@ const UserSession = mongoose.model(
     SessionSchema
 );
 
-// ===============================
+// ==========================================
 // 2. ACTIVE BOTS
-// ===============================
+// ==========================================
 
 const activeBots = new Map();
 
-// ===============================
+const logger = pino({
+    level: 'silent'
+});
+
+// ==========================================
 // 3. WEBSITE
-// ===============================
+// ==========================================
 
 const htmlPage = `
 <!DOCTYPE html>
 <html lang="en">
 
 <head>
+
 <meta charset="UTF-8">
 
 <meta name="viewport"
@@ -92,7 +89,7 @@ content="width=device-width, initial-scale=1.0">
 body {
     font-family: 'Segoe UI', sans-serif;
     background: #121212;
-    color: white;
+    color: #fff;
 
     display: flex;
     justify-content: center;
@@ -105,7 +102,7 @@ body {
 
 .container {
     background: #1e1e1e;
-    padding: 35px;
+    padding: 40px;
     border-radius: 12px;
 
     text-align: center;
@@ -120,18 +117,14 @@ h1 {
     color: #25D366;
 }
 
-p {
-    color: #aaa;
-}
-
 input {
     width: 100%;
-    padding: 13px;
+    padding: 12px;
     margin: 15px 0;
 
     border: 1px solid #333;
     background: #2a2a2a;
-    color: white;
+    color: #fff;
 
     border-radius: 6px;
     font-size: 16px;
@@ -139,10 +132,10 @@ input {
 
 button {
     width: 100%;
-    padding: 13px;
+    padding: 12px;
 
     background: #25D366;
-    color: black;
+    color: #000;
 
     border: none;
     border-radius: 6px;
@@ -153,7 +146,6 @@ button {
 
 button:disabled {
     opacity: 0.6;
-    cursor: not-allowed;
 }
 
 .code-box {
@@ -174,6 +166,7 @@ button:disabled {
 }
 
 </style>
+
 </head>
 
 <body>
@@ -182,7 +175,9 @@ button:disabled {
 
 <h1>Link Your WhatsApp</h1>
 
-<p>Enter number with country code (no +)</p>
+<p style="color:#aaa;font-size:14px;">
+Enter number with country code (no +)
+</p>
 
 <input
 type="text"
@@ -200,7 +195,7 @@ Get Pairing Code
 
 <h2 id="code"></h2>
 
-<p style="font-size:12px">
+<p style="font-size:12px;color:#aaa;">
 WhatsApp > Linked Devices > Link with phone number
 </p>
 
@@ -220,8 +215,8 @@ async function pair() {
 
     const code = document.getElementById('code');
 
-    if (!/^\\d{8,15}$/.test(num)) {
-        return alert('Enter a valid phone number with country code.');
+    if (!/^[0-9]{8,15}$/.test(num)) {
+        return alert('Enter a valid phone number.');
     }
 
     button.disabled = true;
@@ -232,13 +227,13 @@ async function pair() {
 
     try {
 
-        const res = await fetch(
+        const response = await fetch(
             '/pair?number=' + encodeURIComponent(num)
         );
 
-        const data = await res.json();
+        const data = await response.json();
 
-        if (!res.ok || data.error) {
+        if (!response.ok) {
 
             code.innerText = '';
 
@@ -251,8 +246,6 @@ async function pair() {
         }
 
     } catch (error) {
-
-        code.innerText = '';
 
         alert('Connection error. Please try again.');
 
@@ -271,6 +264,10 @@ async function pair() {
 </html>
 `;
 
+// ==========================================
+// 4. WEBSITE ROUTES
+// ==========================================
+
 app.get('/', (req, res) => {
     res.send(htmlPage);
 });
@@ -279,9 +276,9 @@ app.get('/ping', (req, res) => {
     res.send('alive');
 });
 
-// ===============================
-// 4. BOT COMMAND HANDLER
-// ===============================
+// ==========================================
+// 5. BOT COMMANDS
+// ==========================================
 
 function registerCommands(sock, phoneNumber) {
 
@@ -295,18 +292,19 @@ function registerCommands(sock, phoneNumber) {
 
             try {
 
-                const message =
+                const text =
                     m.message.conversation ||
                     m.message.extendedTextMessage?.text ||
+                    m.message.imageMessage?.caption ||
                     '';
 
-                if (!message) continue;
+                if (!text) continue;
 
                 const prefix = '.';
 
-                if (!message.startsWith(prefix)) continue;
+                if (!text.startsWith(prefix)) continue;
 
-                const command = message
+                const command = text
                     .slice(prefix.length)
                     .trim()
                     .split(/\s+/)[0]
@@ -314,12 +312,14 @@ function registerCommands(sock, phoneNumber) {
 
                 const from = m.key.remoteJid;
 
-                const reply = async (text) => {
+                const reply = async (message) => {
+
                     await sock.sendMessage(
                         from,
-                        { text },
+                        { text: message },
                         { quoted: m }
                     );
+
                 };
 
                 // MENU
@@ -330,6 +330,7 @@ function registerCommands(sock, phoneNumber) {
 ╭━━━〔 MULTI-USER BOT 〕━━━╮
 
 ┃
+┃ ▢ Botname: Multi-User Bot
 ┃ ▢ Connected as: ${phoneNumber}
 ┃
 ┣━━━〔 COMMANDS 〕━━━
@@ -349,7 +350,9 @@ function registerCommands(sock, phoneNumber) {
 
                 else if (command === 'ping') {
 
-                    await reply('🏓 Pong! Your bot is active.');
+                    await reply(
+                        '🏓 Pong! Your bot is active.'
+                    );
 
                 }
 
@@ -357,14 +360,16 @@ function registerCommands(sock, phoneNumber) {
 
                 else if (command === 'owner') {
 
-                    await reply('👤 Owner: +254708700675');
+                    await reply(
+                        '👤 Owner: +254708700675'
+                    );
 
                 }
 
             } catch (error) {
 
                 console.error(
-                    'Command Handler Error:',
+                    'COMMAND ERROR:',
                     error.message
                 );
 
@@ -376,18 +381,15 @@ function registerCommands(sock, phoneNumber) {
 
 }
 
-// ===============================
-// 5. SOCKET CREATION
-// ===============================
+// ==========================================
+// 6. SOCKET CONNECTION
+// ==========================================
 
-async function startBot(phoneNumber, userId, onPairingCode) {
+async function connectSocket(bot, onPairingCode = null) {
 
-    const sessionPath = path.join(
-        SESSION_DIR,
-        userId
-    );
+    if (bot.stopped) return;
 
-    fs.mkdirSync(sessionPath, { recursive: true });
+    const sessionPath = bot.sessionPath;
 
     const { state, saveCreds } =
         await useMultiFileAuthState(sessionPath);
@@ -400,18 +402,21 @@ async function startBot(phoneNumber, userId, onPairingCode) {
 
         version = result.version;
 
-        console.log('Using WhatsApp Web version:', version);
+        console.log(
+            'Using WhatsApp Web version:',
+            version
+        );
 
     } catch (error) {
 
-        console.error(
-            'Version fetch failed:',
+        throw new Error(
+            'Unable to fetch WhatsApp Web version: ' +
             error.message
         );
 
-        throw error;
-
     }
+
+    if (bot.stopped) return;
 
     const sock = makeWASocket({
 
@@ -422,11 +427,11 @@ async function startBot(phoneNumber, userId, onPairingCode) {
 
             keys: makeCacheableSignalKeyStore(
                 state.keys,
-                pino({ level: 'fatal' })
+                logger
             )
         },
 
-        logger: pino({ level: 'silent' }),
+        logger,
 
         printQRInTerminal: false,
 
@@ -442,41 +447,51 @@ async function startBot(phoneNumber, userId, onPairingCode) {
 
     });
 
-    const botData = {
-        sock,
-        phoneNumber,
-        stopped: false,
-        reconnectTimer: null,
-        reconnecting: false
-    };
+    bot.sock = sock;
 
-    activeBots.set(userId, botData);
+    bot.reconnecting = false;
+
+    let pairingRequested = false;
+    let connectionClosed = false;
+
+    // SAVE AUTHENTICATION
 
     sock.ev.on('creds.update', saveCreds);
 
-    registerCommands(sock, phoneNumber);
+    // REGISTER COMMANDS
 
-    // ===============================
+    registerCommands(sock, bot.phoneNumber);
+
+    // ======================================
     // PAIRING CODE
-    // ===============================
+    // ======================================
 
     if (!state.creds.registered && onPairingCode) {
 
-        setTimeout(async () => {
+        bot.pairingTimer = setTimeout(async () => {
 
             try {
 
                 if (
-                    botData.stopped ||
+                    bot.stopped ||
+                    pairingRequested ||
                     state.creds.registered
                 ) return;
 
+                pairingRequested = true;
+
+                console.log(
+                    'Requesting pairing code:',
+                    bot.phoneNumber
+                );
+
                 const code = await sock.requestPairingCode(
-                    phoneNumber
+                    bot.phoneNumber
                 );
 
                 console.log(
-                    `Pairing code generated for ${phoneNumber}`
+                    'Pairing code generated:',
+                    bot.phoneNumber
                 );
 
                 onPairingCode(null, code);
@@ -488,7 +503,9 @@ async function startBot(phoneNumber, userId, onPairingCode) {
                     error.message
                 );
 
-                onPairingCode(error);
+                if (onPairingCode) {
+                    onPairingCode(error);
+                }
 
             }
 
@@ -496,9 +513,9 @@ async function startBot(phoneNumber, userId, onPairingCode) {
 
     }
 
-    // ===============================
+    // ======================================
     // CONNECTION UPDATE
-    // ===============================
+    // ======================================
 
     sock.ev.on('connection.update', async (update) => {
 
@@ -510,115 +527,203 @@ async function startBot(phoneNumber, userId, onPairingCode) {
         if (connection === 'connecting') {
 
             console.log(
-                `🔄 Connecting ${phoneNumber}...`
+                'Connecting:',
+                bot.phoneNumber
             );
 
         }
+
+        // ==================================
+        // CONNECTED
+        // ==================================
 
         if (connection === 'open') {
 
             console.log(
-                `✅ WhatsApp connected: ${phoneNumber}`
+                '✅ WhatsApp connected:',
+                bot.phoneNumber
             );
 
-            await UserSession.findOneAndUpdate(
+            try {
 
-                { userId },
+                await UserSession.findOneAndUpdate(
 
-                {
-                    phoneNumber,
-                    isConnected: true
-                },
+                    { userId: bot.userId },
 
-                { upsert: true }
+                    {
+                        phoneNumber: bot.phoneNumber,
+                        isConnected: true
+                    },
 
-            );
+                    { upsert: true }
+
+                );
+
+            } catch (error) {
+
+                console.error(
+                    'DATABASE ERROR:',
+                    error.message
+                );
+
+            }
 
         }
 
+        // ==================================
+        // DISCONNECTED
+        // ==================================
+
         if (connection === 'close') {
+
+            if (connectionClosed) return;
+
+            connectionClosed = true;
 
             const statusCode =
                 lastDisconnect?.error?.output?.statusCode;
 
+            const errorMessage =
+                lastDisconnect?.error?.message ||
+                'Unknown error';
+
             console.log(
-                `❌ Connection closed: ${phoneNumber}`,
+                '❌ Connection closed:',
+                bot.phoneNumber,
                 statusCode,
-                lastDisconnect?.error?.message
+                errorMessage
             );
 
-            await UserSession.findOneAndUpdate(
+            try {
 
-                { userId },
+                await UserSession.findOneAndUpdate(
 
-                { isConnected: false }
+                    { userId: bot.userId },
 
-            );
+                    { isConnected: false }
 
-            if (botData.stopped) return;
-
-            if (statusCode === DisconnectReason.loggedOut) {
-
-                console.log(
-                    `User ${phoneNumber} logged out.`
                 );
 
-                botData.stopped = true;
+            } catch (error) {
 
-                activeBots.delete(userId);
+                console.error(
+                    'DATABASE UPDATE ERROR:',
+                    error.message
+                );
+
+            }
+
+            // ==================================
+            // LOGGED OUT
+            // ==================================
+
+            if (
+                statusCode === DisconnectReason.loggedOut
+            ) {
+
+                console.log(
+                    '🚪 User logged out:',
+                    bot.phoneNumber
+                );
+
+                bot.stopped = true;
+
+                if (bot.pairingTimer) {
+                    clearTimeout(bot.pairingTimer);
+                }
+
+                if (bot.reconnectTimer) {
+                    clearTimeout(bot.reconnectTimer);
+                }
+
+                if (activeBots.get(bot.userId) === bot) {
+                    activeBots.delete(bot.userId);
+                }
+
+                // CLEAR INVALID SESSION
+
+                try {
+
+                    await fs.promises.rm(
+                        sessionPath,
+                        {
+                            recursive: true,
+                            force: true
+                        }
+                    );
+
+                    console.log(
+                        '🧹 Old session cleared:',
+                        bot.phoneNumber
+                    );
+
+                } catch (error) {
+
+                    console.error(
+                        'SESSION CLEANUP ERROR:',
+                        error.message
+                    );
+
+                }
+
+                if (onPairingCode) {
+
+                    onPairingCode(
+                        new Error(
+                            'WhatsApp session expired. Please request a new code.'
+                        )
+                    );
+
+                }
 
                 return;
 
             }
 
-            scheduleReconnect(
-                phoneNumber,
-                userId,
-                botData
-            );
+            // ==================================
+            // OTHER DISCONNECTIONS
+            // ==================================
+
+            if (!bot.stopped) {
+
+                scheduleReconnect(bot);
+
+            }
 
         }
 
     });
 
-    return sock;
-
 }
 
-// ===============================
-// 6. RECONNECTION
-// ===============================
+// ==========================================
+// 7. AUTOMATIC RECONNECTION
+// ==========================================
 
-function scheduleReconnect(phoneNumber, userId, botData) {
+function scheduleReconnect(bot) {
 
-    if (botData.stopped || botData.reconnecting) return;
+    if (
+        bot.stopped ||
+        bot.reconnecting ||
+        bot.reconnectTimer
+    ) return;
 
-    botData.reconnecting = true;
-
-    const statusDelay = 5000;
+    bot.reconnecting = true;
 
     console.log(
-        `🔄 Reconnecting ${phoneNumber} in 5 seconds...`
+        '🔄 Reconnecting:',
+        bot.phoneNumber
     );
 
-    botData.reconnectTimer = setTimeout(async () => {
+    bot.reconnectTimer = setTimeout(async () => {
+
+        bot.reconnectTimer = null;
 
         try {
 
-            if (botData.stopped) return;
+            if (bot.stopped) return;
 
-            // Prevent overlapping socket connections.
-            activeBots.delete(userId);
-
-            await startBot(
-                phoneNumber,
-                userId,
-                null
-            );
-
-            console.log(
-                `🔄 New connection started for ${phoneNumber}`
-            );
+            await connectSocket(bot, null);
 
         } catch (error) {
 
@@ -627,23 +732,90 @@ function scheduleReconnect(phoneNumber, userId, botData) {
                 error.message
             );
 
-            botData.reconnecting = false;
+            bot.reconnecting = false;
 
-            scheduleReconnect(
-                phoneNumber,
-                userId,
-                botData
-            );
+            scheduleReconnect(bot);
 
         }
 
-    }, statusDelay);
+    }, 5000);
 
 }
 
-// ===============================
-// 7. PAIRING ENDPOINT
-// ===============================
+// ==========================================
+// 8. START BOT
+// ==========================================
+
+async function startBot(
+    phoneNumber,
+    userId,
+    onPairingCode = null
+) {
+
+    if (activeBots.has(userId)) {
+
+        throw new Error(
+            'A bot for this number is already running.'
+        );
+
+    }
+
+    const sessionPath = path.join(
+        SESSION_DIR,
+        userId
+    );
+
+    await fs.promises.mkdir(
+        sessionPath,
+        { recursive: true }
+    );
+
+    const bot = {
+
+        userId,
+
+        phoneNumber,
+
+        sessionPath,
+
+        sock: null,
+
+        stopped: false,
+
+        reconnecting: false,
+
+        reconnectTimer: null,
+
+        pairingTimer: null
+
+    };
+
+    activeBots.set(userId, bot);
+
+    try {
+
+        await connectSocket(
+            bot,
+            onPairingCode
+        );
+
+        return bot;
+
+    } catch (error) {
+
+        activeBots.delete(userId);
+
+        bot.stopped = true;
+
+        throw error;
+
+    }
+
+}
+
+// ==========================================
+// 9. PAIRING ENDPOINT
+// ==========================================
 
 app.get('/pair', async (req, res) => {
 
@@ -657,9 +829,12 @@ app.get('/pair', async (req, res) => {
 
     }
 
-    phoneNumber = String(phoneNumber).replace(/\D/g, '');
+    phoneNumber = String(phoneNumber).replace(
+        /[^0-9]/g,
+        ''
+    );
 
-    if (!/^\d{8,15}$/.test(phoneNumber)) {
+    if (!/^[0-9]{8,15}$/.test(phoneNumber)) {
 
         return res.status(400).json({
             error: 'Invalid phone number.'
@@ -669,78 +844,118 @@ app.get('/pair', async (req, res) => {
 
     const userId = 'user_' + phoneNumber;
 
+    const sessionPath = path.join(
+        SESSION_DIR,
+        userId
+    );
+
     try {
 
         if (mongoose.connection.readyState !== 1) {
 
             return res.status(503).json({
-                error: 'Database is not ready. Try again.'
+                error: 'MongoDB is not ready. Try again.'
             });
 
         }
 
-        const existing = activeBots.get(userId);
-
-        if (existing) {
+        if (activeBots.has(userId)) {
 
             return res.status(409).json({
-                error: 'A connection or pairing request is already running for this number.'
+                error: 'This number already has an active connection or pairing request.'
             });
 
         }
 
-        const dbUser = await UserSession.findOne({ userId });
+        // CHECK EXISTING SESSION
 
-        if (dbUser && dbUser.isConnected) {
+        if (fs.existsSync(sessionPath)) {
 
-            return res.status(409).json({
-                error: 'This number is already connected.'
-            });
+            const { state } =
+                await useMultiFileAuthState(sessionPath);
+
+            if (state.creds.registered) {
+
+                return res.status(409).json({
+                    error: 'An existing WhatsApp session was found. If you have unlinked the device, wait for the server to detect logout and clear the old session, then try again.'
+                });
+
+            }
 
         }
 
         let responseSent = false;
 
-        const pairingTimeout = setTimeout(() => {
+        let bot;
 
-            if (!responseSent && !res.headersSent) {
+        const timeout = setTimeout(async () => {
 
-                responseSent = true;
+            if (responseSent) return;
+
+            responseSent = true;
+
+            if (bot) {
+
+                bot.stopped = true;
+
+                if (bot.sock) {
+                    try {
+                        bot.sock.end(
+                            new Error('Pairing timed out')
+                        );
+                    } catch (_) {}
+                }
+
+                activeBots.delete(userId);
+
+            }
+
+            if (!res.headersSent) {
 
                 res.status(504).json({
-                    error: 'Pairing timed out. Check Render logs and try again.'
+                    error: 'Pairing timed out. Please try again and check Render logs.'
                 });
 
             }
 
         }, 45000);
 
-        const sendPairingResult = (error, code) => {
+        const pairingCallback = (error, code) => {
 
-            if (responseSent || res.headersSent) return;
+            if (responseSent) return;
 
             responseSent = true;
 
-            clearTimeout(pairingTimeout);
+            clearTimeout(timeout);
 
             if (error) {
 
-                return res.status(500).json({
-                    error: error.message
+                if (!res.headersSent) {
+
+                    res.status(500).json({
+                        error: error.message
+                    });
+
+                }
+
+                return;
+
+            }
+
+            if (!res.headersSent) {
+
+                res.json({
+                    code
                 });
 
             }
 
-            res.json({
-                code
-            });
-
         };
 
-        await startBot(
+        bot = await startBot(
             phoneNumber,
             userId,
-            sendPairingResult
+            pairingCallback
         );
 
     } catch (error) {
@@ -762,14 +977,128 @@ app.get('/pair', async (req, res) => {
 
 });
 
-// ===============================
-// 8. SERVER START
-// ===============================
+// ==========================================
+// 10. RESTORE SAVED SESSIONS
+// ==========================================
 
-app.listen(PORT, () => {
+async function restoreSessions() {
 
     console.log(
-        `🌐 Web server running on port ${PORT}`
+        '🔄 Checking saved WhatsApp sessions...'
     );
 
-});
+    await fs.promises.mkdir(
+        SESSION_DIR,
+        { recursive: true }
+    );
+
+    const folders = await fs.promises.readdir(
+        SESSION_DIR,
+        { withFileTypes: true }
+    );
+
+    for (const folder of folders) {
+
+        if (!folder.isDirectory()) continue;
+
+        if (!folder.name.startsWith('user_')) continue;
+
+        const phoneNumber = folder.name.slice(5);
+
+        if (!/^[0-9]{8,15}$/.test(phoneNumber)) continue;
+
+        const userId = folder.name;
+
+        try {
+
+            const sessionPath = path.join(
+                SESSION_DIR,
+                userId
+            );
+
+            const { state } =
+                await useMultiFileAuthState(sessionPath);
+
+            if (!state.creds.registered) {
+
+                console.log(
+                    'Skipping incomplete session:',
+                    phoneNumber
+                );
+
+                continue;
+
+            }
+
+            console.log(
+                '♻️ Restoring session:',
+                phoneNumber
+            );
+
+            await startBot(
+                phoneNumber,
+                userId,
+                null
+            );
+
+        } catch (error) {
+
+            console.error(
+                'SESSION RESTORE ERROR:',
+                phoneNumber,
+                error.message
+            );
+
+        }
+
+    }
+
+}
+
+// ==========================================
+// 11. SERVER START
+// ==========================================
+
+async function startServer() {
+
+    try {
+
+        await mongoose.connect(MONGO_URI);
+
+        console.log(
+            '✅ Connected to MongoDB'
+        );
+
+        await fs.promises.mkdir(
+            SESSION_DIR,
+            { recursive: true }
+        );
+
+        app.listen(PORT, async () => {
+
+            console.log(
+                `🌐 Web server running on port ${PORT}`
+            );
+
+            console.log(
+                '🚀 Your WhatsApp multi-user service is live!'
+            );
+
+            await restoreSessions();
+
+        });
+
+    } catch (error) {
+
+        console.error(
+            '❌ SERVER START ERROR:',
+            error
+        );
+
+        process.exit(1);
+
+    }
+
+}
+
+startServer();
