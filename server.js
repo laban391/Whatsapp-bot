@@ -1,7 +1,14 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const makeWASocket = require('@whiskeysockets/baileys').default;
-const { useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, makeCacheableSignalKeyStore, Browsers, delay } = require('@whiskeysockets/baileys');
+const { 
+    useMultiFileAuthState, 
+    DisconnectReason, 
+    fetchLatestWaWebVersion, 
+    makeCacheableSignalKeyStore, 
+    Browsers, 
+    delay 
+} = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const fs = require('fs');
 const path = require('path');
@@ -10,6 +17,7 @@ const app = express();
 app.use(express.json());
 
 // --- 1. CONNECT TO DATABASE ---
+// Make sure your password doesn't contain special characters that need URL encoding
 const MONGO_URI = 'mongodb+srv://labanlaby34_db_user:labanlabanlaban@whatsapp.xv0gpkv.mongodb.net/?retryWrites=true&w=majority';
 
 mongoose.connect(MONGO_URI)
@@ -118,8 +126,8 @@ app.get('/pair', async (req, res) => {
 
     const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
     
-    // --- THE FIX: Use the version and browser settings from your working script ---
-    const { version } = await fetchLatestBaileysVersion();
+    // --- FIX 1: Use the direct WA Web version fetcher ---
+    const { version } = await fetchLatestWaWebVersion();
 
     const sock = makeWASocket({
         version,
@@ -129,7 +137,8 @@ app.get('/pair', async (req, res) => {
         },
         logger: pino({ level: "silent" }),
         printQRInTerminal: false,
-        browser: Browsers.macOS("Safari"), // Spoofs a Mac to bypass blocks
+        // --- FIX 2: Spoof MacOS Safari (Bypasses WA server blocks) ---
+        browser: Browsers.macOS("Safari"),
         syncFullHistory: false,
         connectTimeoutMs: 60000,
         keepAliveIntervalMs: 30000
@@ -144,8 +153,8 @@ app.get('/pair', async (req, res) => {
 
         if (qr && !sock.authState.creds.registered) {
             try {
-                // Add the delay from your working script
-                await delay(1500); 
+                // --- FIX 3: Wait 3 seconds for socket to stabilize ---
+                await delay(3000); 
                 const code = await sock.requestPairingCode(phoneNumber);
                 res.json({ code: code });
             } catch (e) {
