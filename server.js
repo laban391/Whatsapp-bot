@@ -7,12 +7,17 @@ const {
     DisconnectReason,
     fetchLatestWaWebVersion,
     makeCacheableSignalKeyStore,
-    Browsers
+    Browsers,
+    normalizeMessageContent
 } = require('@whiskeysockets/baileys');
 
 const pino = require('pino');
 const fs = require('fs');
 const path = require('path');
+
+// ==========================================
+// CONFIGURATION
+// ==========================================
 
 const app = express();
 
@@ -29,8 +34,10 @@ if (!MONGO_URI) {
     throw new Error('MONGO_URI environment variable is missing.');
 }
 
+const logger = pino({ level: 'silent' });
+
 // ==========================================
-// 1. DATABASE CONNECTION
+// DATABASE
 // ==========================================
 
 const SessionSchema = new mongoose.Schema({
@@ -54,17 +61,13 @@ const UserSession = mongoose.model(
 );
 
 // ==========================================
-// 2. ACTIVE BOTS
+// ACTIVE BOTS
 // ==========================================
 
 const activeBots = new Map();
 
-const logger = pino({
-    level: 'silent'
-});
-
 // ==========================================
-// 3. WEBSITE
+// WEBSITE
 // ==========================================
 
 const htmlPage = `
@@ -102,7 +105,7 @@ body {
 
 .container {
     background: #1e1e1e;
-    padding: 40px;
+    padding: 35px;
     border-radius: 12px;
 
     text-align: center;
@@ -117,14 +120,18 @@ h1 {
     color: #25D366;
 }
 
+p {
+    color: #aaa;
+}
+
 input {
     width: 100%;
-    padding: 12px;
+    padding: 13px;
     margin: 15px 0;
 
     border: 1px solid #333;
     background: #2a2a2a;
-    color: #fff;
+    color: white;
 
     border-radius: 6px;
     font-size: 16px;
@@ -132,10 +139,10 @@ input {
 
 button {
     width: 100%;
-    padding: 12px;
+    padding: 13px;
 
     background: #25D366;
-    color: #000;
+    color: black;
 
     border: none;
     border-radius: 6px;
@@ -175,9 +182,7 @@ button:disabled {
 
 <h1>Link Your WhatsApp</h1>
 
-<p style="color:#aaa;font-size:14px;">
-Enter number with country code (no +)
-</p>
+<p>Enter number with country code (no +)</p>
 
 <input
 type="text"
@@ -195,7 +200,7 @@ Get Pairing Code
 
 <h2 id="code"></h2>
 
-<p style="font-size:12px;color:#aaa;">
+<p style="font-size:12px">
 WhatsApp > Linked Devices > Link with phone number
 </p>
 
@@ -215,7 +220,7 @@ async function pair() {
 
     const code = document.getElementById('code');
 
-    if (!/^[0-9]{8,15}$/.test(num)) {
+    if (!/^\\d{8,15}$/.test(num)) {
         return alert('Enter a valid phone number.');
     }
 
@@ -233,7 +238,7 @@ async function pair() {
 
         const data = await response.json();
 
-        if (!response.ok) {
+        if (!response.ok || data.error) {
 
             code.innerText = '';
 
@@ -265,7 +270,7 @@ async function pair() {
 `;
 
 // ==========================================
-// 4. WEBSITE ROUTES
+// WEBSITE ROUTES
 // ==========================================
 
 app.get('/', (req, res) => {
@@ -277,7 +282,31 @@ app.get('/ping', (req, res) => {
 });
 
 // ==========================================
-// 5. BOT COMMANDS
+// MESSAGE TEXT EXTRACTION
+// ==========================================
+
+function extractMessageText(message) {
+
+    if (!message) return '';
+
+    const msg = normalizeMessageContent(message) || message;
+
+    return (
+        msg.conversation ||
+        msg.extendedTextMessage?.text ||
+        msg.imageMessage?.caption ||
+        msg.videoMessage?.caption ||
+        msg.documentMessage?.caption ||
+        msg.buttonsResponseMessage?.selectedButtonId ||
+        msg.listResponseMessage?.singleSelectReply?.selectedRowId ||
+        msg.templateButtonReplyMessage?.selectedId ||
+        msg.interactiveResponseMessage?.body?.text ||
+        ''
+    );
+}
+
+// ==========================================
+// BOT COMMANDS
 // ==========================================
 
 function registerCommands(sock, phoneNumber) {
@@ -288,29 +317,36 @@ function registerCommands(sock, phoneNumber) {
 
         for (const m of messages) {
 
-            if (!m.message || m.key.fromMe) continue;
+            if (!m.message) continue;
+
+            if (m.key.remoteJid === 'status@broadcast') continue;
 
             try {
 
-                const text =
-                    m.message.conversation ||
-                    m.message.extendedTextMessage?.text ||
-                    m.message.imageMessage?.caption ||
-                    '';
+                const text = extractMessageText(m.message);
 
                 if (!text) continue;
 
-                const prefix = '.';
+                const body = text.trim();
 
-                if (!text.startsWith(prefix)) continue;
+                if (!body.startsWith('.')) continue;
 
-                const command = text
-                    .slice(prefix.length)
+                const args = body
+                    .slice(1)
                     .trim()
-                    .split(/\s+/)[0]
-                    .toLowerCase();
+                    .split(/\s+/);
+
+                const command = args.shift()?.toLowerCase();
+
+                if (!command) continue;
 
                 const from = m.key.remoteJid;
+
+                if (!from) continue;
+
+                console.log(
+                    `📩 Command received: .${command} from ${from}`
+                );
 
                 const reply = async (message) => {
 
@@ -333,7 +369,7 @@ function registerCommands(sock, phoneNumber) {
 ┃ ▢ Botname: Multi-User Bot
 ┃ ▢ Connected as: ${phoneNumber}
 ┃
-┣━━━〔 COMMANDS 〕━━━
+┣━━━〔 COMMAND MENU 〕━━━
 ┃
 ┃ .menu
 ┃ .ping
@@ -369,8 +405,8 @@ function registerCommands(sock, phoneNumber) {
             } catch (error) {
 
                 console.error(
-                    'COMMAND ERROR:',
-                    error.message
+                    '❌ COMMAND ERROR:',
+                    error.stack || error.message
                 );
 
             }
@@ -382,17 +418,15 @@ function registerCommands(sock, phoneNumber) {
 }
 
 // ==========================================
-// 6. SOCKET CONNECTION
+// SOCKET CONNECTION
 // ==========================================
 
 async function connectSocket(bot, onPairingCode = null) {
 
     if (bot.stopped) return;
 
-    const sessionPath = bot.sessionPath;
-
     const { state, saveCreds } =
-        await useMultiFileAuthState(sessionPath);
+        await useMultiFileAuthState(bot.sessionPath);
 
     let version;
 
@@ -410,8 +444,7 @@ async function connectSocket(bot, onPairingCode = null) {
     } catch (error) {
 
         throw new Error(
-            'Unable to fetch WhatsApp Web version: ' +
-            error.message
+            'Version fetch failed: ' + error.message
         );
 
     }
@@ -454,7 +487,7 @@ async function connectSocket(bot, onPairingCode = null) {
     let pairingRequested = false;
     let connectionClosed = false;
 
-    // SAVE AUTHENTICATION
+    // SAVE CREDENTIALS
 
     sock.ev.on('creds.update', saveCreds);
 
@@ -481,7 +514,7 @@ async function connectSocket(bot, onPairingCode = null) {
                 pairingRequested = true;
 
                 console.log(
-                    'Requesting pairing code:',
+                    '🔑 Requesting pairing code:',
                     bot.phoneNumber
                 );
 
@@ -490,7 +523,7 @@ async function connectSocket(bot, onPairingCode = null) {
                 );
 
                 console.log(
-                    'Pairing code generated:',
+                    '✅ Pairing code generated:',
                     bot.phoneNumber
                 );
 
@@ -499,13 +532,11 @@ async function connectSocket(bot, onPairingCode = null) {
             } catch (error) {
 
                 console.error(
-                    'PAIRING ERROR:',
+                    '❌ PAIRING ERROR:',
                     error.message
                 );
 
-                if (onPairingCode) {
-                    onPairingCode(error);
-                }
+                onPairingCode(error);
 
             }
 
@@ -527,15 +558,13 @@ async function connectSocket(bot, onPairingCode = null) {
         if (connection === 'connecting') {
 
             console.log(
-                'Connecting:',
+                '🔄 Connecting:',
                 bot.phoneNumber
             );
 
         }
 
-        // ==================================
         // CONNECTED
-        // ==================================
 
         if (connection === 'open') {
 
@@ -570,9 +599,7 @@ async function connectSocket(bot, onPairingCode = null) {
 
         }
 
-        // ==================================
         // DISCONNECTED
-        // ==================================
 
         if (connection === 'close') {
 
@@ -613,9 +640,7 @@ async function connectSocket(bot, onPairingCode = null) {
 
             }
 
-            // ==================================
             // LOGGED OUT
-            // ==================================
 
             if (
                 statusCode === DisconnectReason.loggedOut
@@ -640,12 +665,10 @@ async function connectSocket(bot, onPairingCode = null) {
                     activeBots.delete(bot.userId);
                 }
 
-                // CLEAR INVALID SESSION
-
                 try {
 
                     await fs.promises.rm(
-                        sessionPath,
+                        bot.sessionPath,
                         {
                             recursive: true,
                             force: true
@@ -653,7 +676,7 @@ async function connectSocket(bot, onPairingCode = null) {
                     );
 
                     console.log(
-                        '🧹 Old session cleared:',
+                        '🧹 Invalid session cleared:',
                         bot.phoneNumber
                     );
 
@@ -670,7 +693,7 @@ async function connectSocket(bot, onPairingCode = null) {
 
                     onPairingCode(
                         new Error(
-                            'WhatsApp session expired. Please request a new code.'
+                            'WhatsApp session expired. Request a new pairing code.'
                         )
                     );
 
@@ -680,9 +703,7 @@ async function connectSocket(bot, onPairingCode = null) {
 
             }
 
-            // ==================================
-            // OTHER DISCONNECTIONS
-            // ==================================
+            // RECONNECT
 
             if (!bot.stopped) {
 
@@ -697,7 +718,7 @@ async function connectSocket(bot, onPairingCode = null) {
 }
 
 // ==========================================
-// 7. AUTOMATIC RECONNECTION
+// AUTOMATIC RECONNECTION
 // ==========================================
 
 function scheduleReconnect(bot) {
@@ -743,7 +764,7 @@ function scheduleReconnect(bot) {
 }
 
 // ==========================================
-// 8. START BOT
+// START BOT
 // ==========================================
 
 async function startBot(
@@ -755,7 +776,7 @@ async function startBot(
     if (activeBots.has(userId)) {
 
         throw new Error(
-            'A bot for this number is already running.'
+            'This number already has an active connection.'
         );
 
     }
@@ -803,9 +824,9 @@ async function startBot(
 
     } catch (error) {
 
-        activeBots.delete(userId);
-
         bot.stopped = true;
+
+        activeBots.delete(userId);
 
         throw error;
 
@@ -814,7 +835,7 @@ async function startBot(
 }
 
 // ==========================================
-// 9. PAIRING ENDPOINT
+// PAIRING ENDPOINT
 // ==========================================
 
 app.get('/pair', async (req, res) => {
@@ -854,7 +875,7 @@ app.get('/pair', async (req, res) => {
         if (mongoose.connection.readyState !== 1) {
 
             return res.status(503).json({
-                error: 'MongoDB is not ready. Try again.'
+                error: 'MongoDB is not ready.'
             });
 
         }
@@ -862,7 +883,7 @@ app.get('/pair', async (req, res) => {
         if (activeBots.has(userId)) {
 
             return res.status(409).json({
-                error: 'This number already has an active connection or pairing request.'
+                error: 'This number already has an active bot.'
             });
 
         }
@@ -877,7 +898,7 @@ app.get('/pair', async (req, res) => {
             if (state.creds.registered) {
 
                 return res.status(409).json({
-                    error: 'An existing WhatsApp session was found. If you have unlinked the device, wait for the server to detect logout and clear the old session, then try again.'
+                    error: 'An existing session was found. If the device was unlinked, wait for logout detection before pairing again.'
                 });
 
             }
@@ -888,7 +909,7 @@ app.get('/pair', async (req, res) => {
 
         let bot;
 
-        const timeout = setTimeout(async () => {
+        const timeout = setTimeout(() => {
 
             if (responseSent) return;
 
@@ -897,6 +918,10 @@ app.get('/pair', async (req, res) => {
             if (bot) {
 
                 bot.stopped = true;
+
+                if (bot.pairingTimer) {
+                    clearTimeout(bot.pairingTimer);
+                }
 
                 if (bot.sock) {
                     try {
@@ -913,7 +938,7 @@ app.get('/pair', async (req, res) => {
             if (!res.headersSent) {
 
                 res.status(504).json({
-                    error: 'Pairing timed out. Please try again and check Render logs.'
+                    error: 'Pairing timed out. Check Render logs.'
                 });
 
             }
@@ -930,25 +955,15 @@ app.get('/pair', async (req, res) => {
 
             if (error) {
 
-                if (!res.headersSent) {
-
-                    res.status(500).json({
-                        error: error.message
-                    });
-
-                }
-
-                return;
-
-            }
-
-            if (!res.headersSent) {
-
-                res.json({
-                    code
+                return res.status(500).json({
+                    error: error.message
                 });
 
             }
+
+            res.json({
+                code
+            });
 
         };
 
@@ -962,7 +977,7 @@ app.get('/pair', async (req, res) => {
 
         console.error(
             'PAIR ENDPOINT ERROR:',
-            error
+            error.stack || error.message
         );
 
         if (!res.headersSent) {
@@ -978,13 +993,13 @@ app.get('/pair', async (req, res) => {
 });
 
 // ==========================================
-// 10. RESTORE SAVED SESSIONS
+// RESTORE SAVED SESSIONS
 // ==========================================
 
 async function restoreSessions() {
 
     console.log(
-        '🔄 Checking saved WhatsApp sessions...'
+        '🔄 Checking saved sessions...'
     );
 
     await fs.promises.mkdir(
@@ -1007,9 +1022,9 @@ async function restoreSessions() {
 
         if (!/^[0-9]{8,15}$/.test(phoneNumber)) continue;
 
-        const userId = folder.name;
-
         try {
+
+            const userId = folder.name;
 
             const sessionPath = path.join(
                 SESSION_DIR,
@@ -1019,19 +1034,10 @@ async function restoreSessions() {
             const { state } =
                 await useMultiFileAuthState(sessionPath);
 
-            if (!state.creds.registered) {
-
-                console.log(
-                    'Skipping incomplete session:',
-                    phoneNumber
-                );
-
-                continue;
-
-            }
+            if (!state.creds.registered) continue;
 
             console.log(
-                '♻️ Restoring session:',
+                '♻️ Restoring:',
                 phoneNumber
             );
 
@@ -1044,19 +1050,22 @@ async function restoreSessions() {
         } catch (error) {
 
             console.error(
-                'SESSION RESTORE ERROR:',
+                'RESTORE ERROR:',
                 phoneNumber,
                 error.message
             );
 
         }
 
+        // Avoid opening too many sockets simultaneously
+        await new Promise(resolve => setTimeout(resolve, 2000));
+
     }
 
 }
 
 // ==========================================
-// 11. SERVER START
+// SERVER START
 // ==========================================
 
 async function startServer() {
@@ -1074,18 +1083,23 @@ async function startServer() {
             { recursive: true }
         );
 
-        app.listen(PORT, async () => {
+        const server = app.listen(PORT, () => {
 
             console.log(
-                `🌐 Web server running on port ${PORT}`
+                `🌐 Server running on port ${PORT}`
             );
 
-            console.log(
-                '🚀 Your WhatsApp multi-user service is live!'
-            );
+            restoreSessions().catch(error => {
+                console.error(
+                    'RESTORE ERROR:',
+                    error.message
+                );
+            });
 
-            await restoreSessions();
+        });
 
+        server.on('error', error => {
+            console.error('SERVER ERROR:', error);
         });
 
     } catch (error) {
