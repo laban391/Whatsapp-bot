@@ -10,7 +10,7 @@ const app = express();
 app.use(express.json());
 
 // --- 1. CONNECT TO DATABASE ---
-const MONGO_URI = 'mongodb+srv://labanlaby34_db_user:XBeNLG0PiA9bYscr@whatsapp.xv0gpkv.mongodb.net/?retryWrites=true&w=majority';
+const MONGO_URI = 'mongodb+srv://labanlaby34_db_user:labanlabanlaban@whatsapp.xv0gpkv.mongodb.net/?retryWrites=true&w=majority';
 
 mongoose.connect(MONGO_URI)
   .then(() => console.log('✅ Connected to MongoDB'))
