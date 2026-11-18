@@ -11,7 +11,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 
 // PASTE YOUR NEW MONGODB ATLAS URL HERE
-const MONGO_URI = 'mongodb+srv://labanlaby34_db_user:labanlabanlaban@whatsapp.xv0gpkv.mongodb.net/?retryWrites=true&w=majority';
+const MONGO_URL = 'mongodb+srv://labanlaby34_db_user:labanlabanlaban@whatsapp.xv0gpkv.mongodb.net/?retryWrites=true&w=majority';
 
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
 const DATA_DIR = path.resolve(
