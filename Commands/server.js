@@ -1,0 +1,1 @@
+const sessionPath = `./sessions/${userId}`;
