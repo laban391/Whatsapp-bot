@@ -16,7 +16,9 @@ const app = express();
 app.use(express.json());
 
 // --- 1. DATABASE CONNECTION ---
+// Replace with your actual MongoDB URI if it's different
 const MONGO_URI = 'mongodb+srv://labanlaby34_db_user:labanlabanlaban@whatsapp.xv0gpkv.mongodb.net/?retryWrites=true&w=majority';
+
 mongoose.connect(MONGO_URI)
   .then(() => console.log('✅ Connected to MongoDB'))
   .catch(err => console.log('❌ MongoDB Error:', err.message));
@@ -28,6 +30,7 @@ const SessionSchema = new mongoose.Schema({
 });
 const UserSession = mongoose.model('UserSession', SessionSchema);
 
+// This keeps the bots in memory while the server is awake
 const activeBots = new Map();
 
 // --- 2. FRONTEND WEBSITE ---
@@ -37,13 +40,14 @@ const htmlPage = `
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WhatsApp Bot Pairing</title>
+    <title>WhatsApp Multi-Bot Pairing</title>
     <style>
         body { font-family: 'Segoe UI', sans-serif; background-color: #121212; color: #fff; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
         .container { background: #1e1e1e; padding: 40px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); text-align: center; max-width: 400px; width: 100%; }
         h1 { color: #25D366; }
         input { width: 100%; padding: 12px; margin: 15px 0; border: 1px solid #333; background: #2a2a2a; color: #fff; border-radius: 6px; font-size: 16px; box-sizing: border-box; }
-        button { width: 100%; padding: 12px; background: #25D366; color: #000; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; }
+        button { width: 100%; padding: 12px; background: #25D366; color: #000; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; transition: 0.3s;}
+        button:hover { background: #1ebe5d; }
         .code-box { margin-top: 20px; padding: 15px; background: #2a2a2a; border: 1px dashed #25D366; border-radius: 6px; display: none; }
         .code-box h2 { color: #25D366; font-size: 28px; letter-spacing: 2px; }
     </style>
@@ -51,11 +55,13 @@ const htmlPage = `
 <body>
     <div class="container">
         <h1>Link Your WhatsApp</h1>
+        <p style="color:#aaa; font-size:14px;">Enter number with country code (no +)</p>
         <input type="text" id="number" placeholder="e.g. 254712345678">
         <button onclick="pair()">Get Pairing Code</button>
         <div class="code-box" id="result">
             <p>Your Pairing Code:</p>
             <h2 id="code"></h2>
+            <p style="font-size:12px; color:#aaa;">WhatsApp > Linked Devices > Link with phone number</p>
         </div>
     </div>
     <script>
@@ -63,14 +69,20 @@ const htmlPage = `
             const num = document.getElementById('number').value.trim();
             if(!num) return alert('Enter a number!');
             document.getElementById('result').style.display = 'none';
-            document.getElementById('code').innerText = "Loading... (Please wait 50s if server was asleep)";
+            document.getElementById('code').innerText = "Loading...";
             document.getElementById('result').style.display = 'block';
+            document.querySelector('button').innerText = "Please wait...";
+            
             try {
                 const res = await fetch('/pair?number=' + num);
                 const data = await res.json();
                 if(data.error) alert(data.error);
                 else document.getElementById('code').innerText = data.code;
-            } catch(e) { alert('Failed to connect'); }
+            } catch(e) { 
+                alert('Server is waking up. Please wait 30 seconds and try again.'); 
+            } finally {
+                document.querySelector('button').innerText = "Get Pairing Code";
+            }
         }
     </script>
 </body>
@@ -78,7 +90,11 @@ const htmlPage = `
 `;
 app.get('/', (req, res) => res.send(htmlPage));
 
-// --- 3. THE PAIRING ENDPOINT ---
+// --- 3. KEEP ALIVE PING FOR RENDER ---
+// This prevents the server from sleeping
+app.get('/ping', (req, res) => res.send('alive'));
+
+// --- 4. THE PAIRING ENDPOINT ---
 app.get('/pair', async (req, res) => {
     let phoneNumber = req.query.number;
     if (!phoneNumber) return res.status(400).json({ error: 'Please provide a number.' });
@@ -86,9 +102,10 @@ app.get('/pair', async (req, res) => {
 
     const userId = 'user_' + phoneNumber;
 
+    // Check if already connected
     let dbUser = await UserSession.findOne({ userId });
     if (dbUser && dbUser.isConnected && activeBots.has(userId)) {
-        return res.json({ error: '❌ This number is already connected!' });
+        return res.json({ error: '❌ This number is already connected and running!' });
     }
 
     const sessionPath = `./sessions/${userId}`;
@@ -97,6 +114,7 @@ app.get('/pair', async (req, res) => {
     const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
     const { version } = await fetchLatestWaWebVersion();
 
+    // --- THE GOLDEN TICKET CONNECTION (From your working pair.js) ---
     const sock = makeWASocket({
         version,
         auth: {
@@ -105,8 +123,10 @@ app.get('/pair', async (req, res) => {
         },
         logger: pino({ level: "silent" }),
         printQRInTerminal: false,
-        browser: Browsers.macOS("Safari"), 
-        syncFullHistory: false
+        browser: Browsers.macOS("Safari"), // Bypasses WA blocks
+        syncFullHistory: false,
+        connectTimeoutMs: 60000,
+        keepAliveIntervalMs: 30000
     });
 
     activeBots.set(userId, sock);
@@ -115,6 +135,7 @@ app.get('/pair', async (req, res) => {
     sock.ev.on('connection.update', async (update) => {
         const { qr, connection, lastDisconnect } = update;
 
+        // Request code INSTANTLY when QR event fires
         if (qr && !sock.authState.creds.registered) {
             try {
                 const code = await sock.requestPairingCode(phoneNumber);
@@ -137,7 +158,7 @@ app.get('/pair', async (req, res) => {
             const statusCode = lastDisconnect?.error?.output?.statusCode;
             if (statusCode !== DisconnectReason.loggedOut) {
                 console.log(`🔄 Reconnecting user ${phoneNumber}...`);
-                activeBots.delete(userId);
+                // Let Baileys handle auto-reconnect naturally
             } else {
                 console.log(`❌ User ${phoneNumber} logged out.`);
                 await UserSession.findOneAndUpdate({ userId }, { isConnected: false });
@@ -146,7 +167,7 @@ app.get('/pair', async (req, res) => {
         }
     });
 
-    // --- 4. MESSAGE HANDLER (Safe Commands Only) ---
+    // --- 5. THE BOT COMMANDS ---
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
         if (type !== 'notify') return;
         for (const m of messages) {
@@ -165,7 +186,7 @@ app.get('/pair', async (req, res) => {
                 };
 
                 if (command === "menu") {
-                    let menuText = `\n. ▢ Botname : *Koirii Official*\n. ▢ Connected as : ${phoneNumber}\n\n ╭▢ *Command Menu*\n │.menu\n │.ping\n │.owner\n ╰▢\n\n`;
+                    let menuText = `\n. ▢ Botname : *Multi-User Bot*\n. ▢ Connected as : ${phoneNumber}\n\n ╭▢ *Command Menu*\n │.menu\n │.ping\n │.owner\n ╰▢\n\n`;
                     await reply(menuText);
                 }
 
