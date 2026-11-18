@@ -1,6 +1,7 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const makeWASocket = require('@whiskeysockets/baileys').default;
+// FIX: Use fetchLatestWaWebVersion instead of fetchLatestBaileysVersion
 const { useMultiFileAuthState, DisconnectReason, fetchLatestWaWebVersion } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const fs = require('fs');
@@ -10,7 +11,6 @@ const app = express();
 app.use(express.json());
 
 // --- 1. CONNECT TO DATABASE ---
-// Make sure your password is lowercase/numbers only to avoid auth errors
 const MONGO_URI = 'mongodb+srv://labanlaby34_db_user:labanlabanlaban@whatsapp.xv0gpkv.mongodb.net/?retryWrites=true&w=majority';
 
 mongoose.connect(MONGO_URI)
@@ -118,6 +118,8 @@ app.get('/pair', async (req, res) => {
     }
 
     const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
+    
+    // FIX: Use fetchLatestWaWebVersion for the current version
     const { version } = await fetchLatestWaWebVersion();
 
     const sock = makeWASocket({
@@ -130,13 +132,13 @@ app.get('/pair', async (req, res) => {
 
     activeBots.set(userId, sock);
 
-    // --- THE FIX: Wait for QR event to request code ---
     sock.ev.on('connection.update', async (update) => {
         const { qr, connection, lastDisconnect } = update;
 
-        // Only ask for the pairing code when the socket is ready (QR event fires)
+        // FIX: Wait for QR event, then wait 2 seconds before requesting code
         if (qr && !sock.authState.creds.registered) {
             try {
+                await new Promise(resolve => setTimeout(resolve, 2000));
                 const code = await sock.requestPairingCode(phoneNumber);
                 res.json({ code: code });
             } catch (e) {
@@ -173,7 +175,7 @@ app.get('/pair', async (req, res) => {
         const m = messages[0];
         if (!m.message || m.key.fromMe) return;
 
-        const text = m.message.conversation || m.message.extendedTextMessage?.text || '';
+        const text = m.message.conversation || m.message.extendedMessage?.text || '';
         const from = m.key.remoteJid;
 
         if (text === '.menu') {
