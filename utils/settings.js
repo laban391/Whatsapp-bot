@@ -18,7 +18,7 @@ const db = require('../database');
 const MANAGED_KEYS = ['prefix', 'botName', 'timezone', 'menuStyle', 'fontStyle'];
 const DEFAULTS = {
   prefix: '.',
-  botName: 'GAAJU-MD',
+  botName: 'LABAN-XMD',
   timezone: 'Africa/Lagos',
   menuStyle: '1',
   fontStyle: 'normal'
