@@ -17,27 +17,27 @@
 //                                                                                                                                                                                        //
 //════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════//
 //* 
-//  * project_name : GAAJU-XMD
-//  * author : gaajutech
+//  * project_name : LABAN-XMD
+//  * author : laban
 //  * youtube : https://www.youtube.com/Xchristech 
-//  * description : GAAJU-XMD ,A Multi-Device whatsapp user bot.
+//  * description : LABAN-XMD ,A Multi-Device whatsapp user bot.
 //*
 //*
 //re-upload? recode? copy code? give credit to gaajutech 2026:)
-//Instagram: gaajutech
+//Instagram: asvia
 //Telegram: t.me/Official_ChrisGaaju
-//GitHub: Xchristech2 
-//WhatsApp: +2348069675806
+//GitHub: laban391 
+//WhatsApp: +254708700675
 //want more free bot scripts? subscribe to my youtube channel: https://youtube.com/@Xchristech
-//   * Created By Github: gaajutechh.
-//   * Credit To chris gaaju
-//   * © 2026 GAAJU-XMD.
+//   * Created By Github: laban.
+//   * Credit To laban
+//   * © 2026 LABAN-XMD.
 // ⛥┌┤
 // */
 
 /**
  * ============================================
- *  GAAJU-XMD BOT SETTINGS
+ *  LABAN-XMD BOT SETTINGS
  * ============================================
  * 
  * BOT LANGUAGE SETTINGS:
@@ -84,11 +84,11 @@
 
 const settings = {
   // ========== BOT INFORMATION ==========
-  packname: 'GAAJU-XMD',
-  author: '‎Chris Gaaju',
-  botName: "GAAJU-XMD",
-  botOwner: 'Chris Gaaju',
-  description: "GAAJU-XMD ,A Multi-Device whatsapp user bot",
+  packname: 'LABAN-XMD',
+  author: '‎Laban',
+  botName: "LABAN-XMD",
+  botOwner: 'Laban',
+  description: "Laban-XMD ,A Multi-Device whatsapp user bot",
   version: "3.0.5",
   
   // ========== BOT LANGUAGE ==========
@@ -99,7 +99,7 @@ const settings = {
   // ========== BOT CONFIGURATION ==========
   timezone: 'Africa/Lagos',
   prefix: '.',
-  ownerNumber: '2348069675806',
+  ownerNumber: '254708700675',
   commandMode: "private",
   
   // ========== API KEYS ==========
