@@ -1,0 +1,164 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LABAN-XMD | Connect</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{
+ min-height:100vh;font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+ display:flex;align-items:center;justify-content:center;padding:1.5rem;
+ background:url('https://cdn.phototourl.com/anon/2026-11-19-856f69ca-e60d-4388-a15b-db487a657a51.jpg') no-repeat center center fixed;
+ background-size:cover;background-color:#0b0914;color:#fff
+}
+.app-container{
+ width:100%;max-width:480px;background:rgba(15,12,28,.35);
+ backdrop-filter:blur(16px) saturate(150%);-webkit-backdrop-filter:blur(16px) saturate(150%);
+ border-radius:28px;padding:2rem 1.8rem;border:1px solid rgba(255,255,255,.15);
+ box-shadow:0 30px 60px rgba(0,0,0,.5),0 0 0 1px rgba(255,255,255,.05) inset;
+ display:flex;flex-direction:column;gap:1.5rem
+}
+.header{display:flex;justify-content:space-between;align-items:center}
+.brand{display:flex;align-items:center;gap:.8rem}
+.logo-icon{width:42px;height:42px;background:linear-gradient(135deg,#a855f7,#6366f1);border-radius:12px;display:flex;align-items:center;justify-content:center}
+.logo-icon svg{width:22px;height:22px;fill:none;stroke:#fff;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.brand-name{font-size:1.15rem;font-weight:800;letter-spacing:.5px;text-shadow:0 2px 4px #0008}
+.status-badge{background:rgba(16,185,129,.15);color:#34d399;border:1px solid rgba(52,211,153,.4);padding:.4rem .8rem;border-radius:20px;font-size:.65rem;font-weight:700;letter-spacing:1px;display:flex;align-items:center;gap:.4rem}
+.live-dot{width:6px;height:6px;background:#34d399;border-radius:50%;animation:pulse 1.5s infinite}
+@keyframes pulse{70%{box-shadow:0 0 0 6px rgba(52,211,153,0)}}
+.titles{text-align:center;margin-top:.5rem}
+.titles h1{font-size:1.8rem;margin-bottom:.5rem;text-shadow:0 2px 8px #0008}
+.titles p{font-size:.95rem;color:#e4e4e7;text-shadow:0 1px 4px #0008}
+.field-label{font-size:.85rem;color:#e4e4e7;font-weight:600}
+.phone-input{width:100%;margin-top:.55rem;padding:1rem;border-radius:12px;background:rgba(30,27,75,.35);border:1px solid rgba(99,102,241,.4);color:white;font-size:1rem;outline:none}
+.phone-input::placeholder{color:#c4b5fd99}
+.code-box{background:rgba(30,27,75,.25);border:1px solid rgba(99,102,241,.3);border-radius:16px;padding:1.5rem;display:flex;flex-direction:column;gap:1rem;box-shadow:0 10px 30px #0002}
+.code-header{display:flex;justify-content:space-between;align-items:center}
+.code-label{font-size:.85rem;color:#d4d4d8;font-weight:600}
+.copy-btn{background:transparent;color:#34d399;border:0;font-family:inherit;font-size:.75rem;font-weight:700;letter-spacing:1px;cursor:pointer;padding:.3rem .6rem;border-radius:6px}
+.copy-btn:hover{background:rgba(52,211,153,.15)}
+.code-value{font-size:1.9rem;font-weight:700;letter-spacing:2px;font-family:monospace;color:#fff;overflow-wrap:anywhere;text-shadow:0 2px 6px #0008}
+.code-hint{font-size:.75rem;color:#a5b4fc;margin-top:-.5rem}
+.generate-btn{width:100%;background:rgba(255,255,255,.08);color:#fff;border:1px solid rgba(255,255,255,.25);padding:.9rem;border-radius:12px;font-family:inherit;font-size:.9rem;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:.5rem}
+.generate-btn:hover{background:rgba(255,255,255,.15);border-color:rgba(255,255,255,.5)}
+.generate-btn:disabled{opacity:.55;cursor:wait}
+.generate-btn svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:2}
+.instructions{text-align:center;display:flex;flex-direction:column;gap:1.2rem}
+.instructions h2{font-size:1.05rem;color:#e4e4e7}
+.steps{display:flex;flex-direction:column;gap:.8rem;font-size:.9rem;color:#d4d4d8;line-height:1.5;text-shadow:0 1px 3px #0008}
+.footer{text-align:center;font-size:.75rem;color:#818cf8;font-weight:600;letter-spacing:1.5px;margin-top:.5rem}
+@media(max-width:480px){.app-container{padding:1.5rem 1.2rem;border-radius:20px}.titles h1{font-size:1.5rem}.code-value{font-size:1.5rem}.steps{font-size:.85rem}}
+</style>
+</head>
+<body>
+<main class="app-container">
+ <header class="header">
+  <div class="brand">
+   <div class="logo-icon"><svg viewBox="0 0 24 24"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg></div>
+   <span class="brand-name">LABAN-XMD</span>
+  </div>
+  <div class="status-badge"><span class="live-dot"></span>LIVE</div>
+ </header>
+
+ <section class="titles">
+  <h1>Connect your WhatsApp</h1>
+  <p>Fast. Secure. Always connected.</p>
+ </section>
+
+ <div>
+  <label class="field-label" for="phone">WhatsApp number (include country code)</label>
+  <input class="phone-input" id="phone" type="tel" placeholder="e.g. 254712345678" autocomplete="tel">
+ </div>
+
+ <div class="code-box">
+  <div class="code-header">
+   <span class="code-label">Pairing code</span>
+   <button class="copy-btn" id="copyBtn" type="button">COPY</button>
+  </div>
+  <div class="code-value" id="pairingCode">XXXXXXXX</div>
+  <div class="code-hint" id="codeHint">Enter your number and generate a real pairing code.</div>
+ </div>
+
+ <button class="generate-btn" id="generateBtn" type="button">
+  <svg viewBox="0 0 24 24"><path d="M21 2v6h-6M3 12a9 9 0 0 1 15-6.7L21 8M3 22v-6h6M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
+  Generate Pairing Code
+ </button>
+
+ <section class="instructions">
+  <h2>How to connect</h2>
+  <div class="steps">
+   <div>1. Open WhatsApp on your phone.</div>
+   <div>2. Go to Linked Devices.</div>
+   <div>3. Select Link a Device.</div>
+   <div>4. Choose Link with phone number instead.</div>
+   <div>5. Enter your LABAN-XMD pairing code.</div>
+  </div>
+ </section>
+
+ <footer class="footer">POWERED BY LABAN-XMD</footer>
+</main>
+
+<script>
+const phoneInput=document.getElementById('phone');
+const codeValue=document.getElementById('pairingCode');
+const codeHint=document.getElementById('codeHint');
+const generateBtn=document.getElementById('generateBtn');
+const copyBtn=document.getElementById('copyBtn');
+
+generateBtn.addEventListener('click',async()=>{
+ const number=phoneInput.value.replace(/\D/g,'');
+ if(number.length<10||number.length>15){
+  codeHint.textContent='Enter a valid phone number with country code.';
+  codeHint.style.color='#f87171';
+  return;
+ }
+ generateBtn.disabled=true;
+ generateBtn.textContent='Generating pairing code...';
+ codeHint.textContent='Contacting LABAN-XMD server...';
+ codeHint.style.color='#a5b4fc';
+ codeValue.textContent='........';
+
+ try{
+  // This endpoint must be implemented by your existing server.
+  const response=await fetch('/api/pair',{
+   method:'POST',
+   headers:{'Content-Type':'application/json'},
+   body:JSON.stringify({phoneNumber:number})
+  });
+  const data=await response.json();
+  if(!response.ok||!data.code)throw new Error(data.error||'Could not generate pairing code.');
+  codeValue.textContent=data.code;
+  codeHint.textContent='Code generated. Enter it in WhatsApp Linked Devices.';
+  codeHint.style.color='#a5b4fc';
+  copyBtn.textContent='COPY';
+ }catch(error){
+  codeValue.textContent='XXXXXXXX';
+  codeHint.textContent=error.message||'Pairing failed. Please try again.';
+  codeHint.style.color='#f87171';
+ }finally{
+  generateBtn.disabled=false;
+  generateBtn.innerHTML='<svg viewBox="0 0 24 24"><path d="M21 2v6h-6M3 12a9 9 0 0 1 15-6.7L21 8M3 22v-6h6M21 12a9 9 0 0 1-15 6.7L3 16"/></svg> Generate Pairing Code';
+ }
+});
+
+copyBtn.addEventListener('click',async()=>{
+ const code=codeValue.textContent.trim();
+ if(!code||code==='XXXXXXXX'||code==='........'){
+  codeHint.textContent='Generate a pairing code first.';
+  codeHint.style.color='#f87171';
+  return;
+ }
+ try{
+  await navigator.clipboard.writeText(code);
+  copyBtn.textContent='COPIED!';
+  setTimeout(()=>copyBtn.textContent='COPY',1800);
+ }catch{
+  codeHint.textContent='Copy failed. Please select and copy the code manually.';
+  codeHint.style.color='#f87171';
+ }
+});
+</script>
+</body>
+</html>
