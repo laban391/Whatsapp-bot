@@ -4,671 +4,440 @@
 const fs = require('fs');
 const path = require('path');
 const { AsyncLocalStorage } = require('async_hooks');
-const config = require('./config');
 
 const tenantContext = new AsyncLocalStorage();
 
-const databaseRoot = path.join(__dirname, 'database');
-const tenantsRoot = path.join(databaseRoot, 'tenants');
+const ROOT = path.join(__dirname, 'database', 'tenants');
 
-fs.mkdirSync(databaseRoot, { recursive: true });
-fs.mkdirSync(tenantsRoot, { recursive: true });
-
-const DEFAULT_FILES = {
-  groups: {},
-  users: {},
-  warnings: {},
-  mods: { moderators: [] },
-  muted: {},
-  botmode: { mode: 'public' },
-  'bot-settings': {},
-  session: {}
+const FILES = {
+  groups: 'groups.json',
+  users: 'users.json',
+  warnings: 'warnings.json',
+  mods: 'mods.json',
+  muted: 'muted.json',
+  botmode: 'botmode.json',
+  settings: 'bot-settings.json',
+  antiforward: 'antiforward.json',
+  antiforwardWarnings: 'antiforward-warnings.json',
+  session: 'session.json',
+  settingsFile: 'settings.json'
 };
+
+const VALID_BOT_MODES = ['public', 'private', 'group', 'self'];
 
 const BOT_SETTINGS_DEFAULTS = {
   prefix: '.',
-  botName: 'GAAJU-MD',
-  timezone: 'Africa/Lagos',
-  menuStyle: '1',
-  fontStyle: 'normal',
-  presenceMode: 'off',
-  autoReadMode: 'off',
-  autoReact: false,
-  autoReactMode: 'bot',
+  botName: 'LABAN-XMD',
+  ownerName: 'Owner',
+  autoRead: false,
+  autoTyping: false,
+  autoRecording: false,
   alwaysOnline: false,
-  autoStatusView: false,
-  autoStatusReact: false,
-  autoStatusEmoji: '💙',
-  autoStatusEmojiPool: [],
-  autoStatusRandomEmoji: false,
-  readReceipts: 'off',
-  menuImageCustom: false,
-  selfMode: false,
-  autoSticker: false,
-  autoDownload: false,
-  autoBio: false
+  autoReact: false
 };
 
-const VALID_BOT_MODES = ['public', 'private', 'group', 'pm'];
-
-const cache = new Map();
+const DEFAULT_GROUP_SETTINGS = {
+  antilink: false,
+  antispam: false,
+  welcome: false,
+  goodbye: false,
+  chatbot: false,
+  nsfw: false,
+  antibadword: false,
+  antiforward: false
+};
 
 function getTenantId() {
-  return tenantContext.getStore() || null;
-}
+  const id = tenantContext.getStore();
 
-function safeTenantId(value) {
-  const id = String(value || '').trim();
-
-  if (!id || id.length > 100 || !/^[a-zA-Z0-9_-]+$/.test(id)) {
-    throw new Error('Invalid or missing tenant ID');
+  if (!id) {
+    throw new Error(
+      'No tenant context. Call database.runWithTenant() first.'
+    );
   }
 
-  return id;
+  return String(id).replace(/[^a-zA-Z0-9_-]/g, '_');
 }
 
-/**
- * Run a bot operation inside its own database context.
- * All database functions called during this operation
- * automatically use that bot's files.
- */
 function runWithTenant(tenantId, callback) {
-  const id = safeTenantId(tenantId);
-
-  if (typeof callback !== 'function') {
-    throw new Error('A callback function is required');
+  if (!tenantId) {
+    throw new Error('Tenant ID is required');
   }
 
-  return tenantContext.run(id, callback);
+  return tenantContext.run(String(tenantId), callback);
 }
 
-function getDatabaseDirectory() {
-  const tenantId = getTenantId();
+function tenantDirectory() {
+  const directory = path.join(ROOT, getTenantId());
 
-  if (!tenantId) {
-    return databaseRoot;
-  }
-
-  const directory = path.join(tenantsRoot, tenantId);
   fs.mkdirSync(directory, { recursive: true });
 
   return directory;
 }
 
-function getFile(name) {
-  return path.join(getDatabaseDirectory(), `${name}.json`);
+function filePath(name) {
+  return path.join(tenantDirectory(), FILES[name]);
 }
 
-function initialValue(name) {
-  return JSON.parse(JSON.stringify(DEFAULT_FILES[name] || {}));
-}
-
-function readDatabase(name) {
-  const file = getFile(name);
-
-  if (cache.has(file)) {
-    return cache.get(file);
-  }
-
-  let data;
+function readJSON(name, fallback = {}) {
+  const file = filePath(name);
 
   try {
-    if (fs.existsSync(file)) {
-      const content = fs.readFileSync(file, 'utf8');
-
-      if (content.trim()) {
-        data = JSON.parse(content);
-      }
+    if (!fs.existsSync(file)) {
+      writeJSON(name, fallback);
+      return structuredClone(fallback);
     }
+
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
   } catch (error) {
-    console.error(`[DB] Read failed for ${name}:`, error.message);
-
-    try {
-      const backup = `${file}.bak`;
-
-      if (fs.existsSync(backup)) {
-        data = JSON.parse(fs.readFileSync(backup, 'utf8'));
-        console.log(`[DB] Recovered ${name} from backup`);
-      }
-    } catch (backupError) {
-      console.error(`[DB] Backup recovery failed:`, backupError.message);
-    }
+    console.error(`Database read error (${name}):`, error.message);
+    return structuredClone(fallback);
   }
+}
 
-  if (data === undefined || data === null) {
-    data = initialValue(name);
-  }
+function writeJSON(name, data) {
+  const file = filePath(name);
+  const temporary = `${file}.tmp`;
 
-  cache.set(file, data);
+  fs.writeFileSync(
+    temporary,
+    JSON.stringify(data, null, 2)
+  );
+
+  fs.renameSync(temporary, file);
 
   return data;
 }
 
-function writeDatabase(name, data) {
-  const file = getFile(name);
-  const temp = `${file}.tmp`;
-  const backup = `${file}.bak`;
-
-  try {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-
-    const content = JSON.stringify(data, null, 2);
-
-    fs.writeFileSync(temp, content, 'utf8');
-
-    if (fs.existsSync(file)) {
-      try {
-        fs.copyFileSync(file, backup);
-      } catch (error) {
-        console.error('[DB] Backup creation failed:', error.message);
-      }
-    }
-
-    fs.renameSync(temp, file);
-    cache.set(file, data);
-
-    return true;
-  } catch (error) {
-    console.error(`[DB] Write failed for ${name}:`, error.message);
-
-    try {
-      if (fs.existsSync(temp)) fs.unlinkSync(temp);
-    } catch (_) {}
-
-    return false;
-  }
+function getGroupSettings(groupId) {
+  const groups = readJSON('groups', {});
+  return {
+    ...DEFAULT_GROUP_SETTINGS,
+    ...(groups[groupId] || {})
+  };
 }
 
-function getGroupSettings(groupId) {
-  const groups = readDatabase('groups');
+function updateGroupSettings(groupId, updates) {
+  const groups = readJSON('groups', {});
 
-  if (!groups[groupId]) {
-    groups[groupId] = {
-      ...config.defaultGroupSettings
-    };
+  groups[groupId] = {
+    ...DEFAULT_GROUP_SETTINGS,
+    ...(groups[groupId] || {}),
+    ...updates
+  };
 
-    writeDatabase('groups', groups);
-  }
-
+  writeJSON('groups', groups);
   return groups[groupId];
 }
 
-function updateGroupSettings(groupId, settings) {
-  const groups = readDatabase('groups');
-
-  groups[groupId] = {
-    ...(groups[groupId] || {}),
-    ...settings
-  };
-
-  return writeDatabase('groups', groups);
-}
-
 function getUser(userId) {
-  const users = readDatabase('users');
-
-  if (!users[userId]) {
-    users[userId] = {
-      registered: Date.now(),
-      premium: false,
-      banned: false
-    };
-
-    writeDatabase('users', users);
-  }
-
-  return users[userId];
+  const users = readJSON('users', {});
+  return users[userId] || {};
 }
 
 function updateUser(userId, updates) {
-  const users = readDatabase('users');
+  const users = readJSON('users', {});
 
   users[userId] = {
     ...(users[userId] || {}),
     ...updates
   };
 
-  return writeDatabase('users', users);
-}
-
-function warningKey(groupId, userId) {
-  return `${groupId}_${userId}`;
+  writeJSON('users', users);
+  return users[userId];
 }
 
 function getWarnings(groupId, userId) {
-  const warnings = readDatabase('warnings');
+  const warnings = readJSON('warnings', {});
+  const group = warnings[groupId] || {};
 
-  return warnings[warningKey(groupId, userId)] || {
-    count: 0,
-    warnings: []
-  };
+  if (userId) return group[userId] || 0;
+
+  return group;
 }
 
-function addWarning(groupId, userId, reason) {
-  const warnings = readDatabase('warnings');
-  const key = warningKey(groupId, userId);
+function addWarning(groupId, userId) {
+  const warnings = readJSON('warnings', {});
 
-  if (!warnings[key]) {
-    warnings[key] = {
-      count: 0,
-      warnings: []
-    };
-  }
+  if (!warnings[groupId]) warnings[groupId] = {};
 
-  warnings[key].count++;
+  warnings[groupId][userId] =
+    (warnings[groupId][userId] || 0) + 1;
 
-  warnings[key].warnings.push({
-    reason,
-    date: Date.now()
-  });
-
-  writeDatabase('warnings', warnings);
-
-  return warnings[key];
+  writeJSON('warnings', warnings);
+  return warnings[groupId][userId];
 }
 
 function removeWarning(groupId, userId) {
-  const warnings = readDatabase('warnings');
-  const key = warningKey(groupId, userId);
+  const warnings = readJSON('warnings', {});
 
-  if (warnings[key] && warnings[key].count > 0) {
-    warnings[key].count--;
-    warnings[key].warnings.pop();
+  if (warnings[groupId] && warnings[groupId][userId]) {
+    warnings[groupId][userId]--;
 
-    writeDatabase('warnings', warnings);
-    return true;
+    if (warnings[groupId][userId] <= 0) {
+      delete warnings[groupId][userId];
+    }
   }
 
-  return false;
+  writeJSON('warnings', warnings);
+  return warnings[groupId]?.[userId] || 0;
 }
 
 function clearWarnings(groupId, userId) {
-  const warnings = readDatabase('warnings');
+  const warnings = readJSON('warnings', {});
 
-  delete warnings[warningKey(groupId, userId)];
+  if (userId) {
+    if (warnings[groupId]) {
+      delete warnings[groupId][userId];
+    }
+  } else {
+    delete warnings[groupId];
+  }
 
-  return writeDatabase('warnings', warnings);
+  writeJSON('warnings', warnings);
 }
 
 function getModerators() {
-  const mods = readDatabase('mods');
-  return mods.moderators || [];
+  return readJSON('mods', []);
 }
 
 function addModerator(userId) {
-  const mods = readDatabase('mods');
+  const moderators = getModerators();
 
-  if (!Array.isArray(mods.moderators)) {
-    mods.moderators = [];
+  if (!moderators.includes(userId)) {
+    moderators.push(userId);
   }
 
-  if (mods.moderators.includes(userId)) {
-    return false;
-  }
-
-  mods.moderators.push(userId);
-
-  return writeDatabase('mods', mods);
+  writeJSON('mods', moderators);
+  return moderators;
 }
 
 function removeModerator(userId) {
-  const mods = readDatabase('mods');
+  const moderators = getModerators()
+    .filter(id => id !== userId);
 
-  if (!Array.isArray(mods.moderators)) {
-    return false;
-  }
-
-  mods.moderators = mods.moderators.filter(id => id !== userId);
-
-  return writeDatabase('mods', mods);
+  writeJSON('mods', moderators);
+  return moderators;
 }
 
 function isModerator(userId) {
-  const moderators = getModerators();
-
-  if (moderators.includes(userId)) {
-    return true;
-  }
-
-  // Preserve the original reverse LID mapping check.
-  const tenantId = getTenantId();
-
-  const sessionDirectory = tenantId
-    ? path.join(tenantsRoot, tenantId, 'session')
-    : path.join(__dirname, config.sessionName || 'session');
-
-  const mappingFile = path.join(
-    sessionDirectory,
-    `lid-mapping-${userId}_reverse.json`
-  );
-
-  try {
-    if (fs.existsSync(mappingFile)) {
-      const mapped = JSON.parse(
-        fs.readFileSync(mappingFile, 'utf8').trim()
-      );
-
-      if (mapped && moderators.includes(String(mapped))) {
-        return true;
-      }
-    }
-  } catch (error) {
-    console.error('[DB] LID mapping read failed:', error.message);
-  }
-
-  return false;
+  return getModerators().includes(userId);
 }
 
-function getBadWords(groupId) {
-  const settings = getGroupSettings(groupId);
-
-  return Array.isArray(settings.badwords)
-    ? settings.badwords
-    : [];
+function getBadWords() {
+  const settings = readJSON('settings', {});
+  return settings.badWords || [];
 }
 
-function addBadWord(groupId, word) {
-  const groups = readDatabase('groups');
+function addBadWord(word) {
+  const settings = readJSON('settings', {});
+  const words = settings.badWords || [];
 
-  if (!groups[groupId]) {
-    groups[groupId] = {
-      ...config.defaultGroupSettings
-    };
-  }
+  if (!words.includes(word)) words.push(word);
 
-  if (!Array.isArray(groups[groupId].badwords)) {
-    groups[groupId].badwords = [];
-  }
+  settings.badWords = words;
+  writeJSON('settings', settings);
 
-  const normalized = String(word).toLowerCase().trim();
-
-  if (!normalized || groups[groupId].badwords.includes(normalized)) {
-    return false;
-  }
-
-  groups[groupId].badwords.push(normalized);
-
-  return writeDatabase('groups', groups);
+  return words;
 }
 
-function removeBadWord(groupId, word) {
-  const groups = readDatabase('groups');
+function removeBadWord(word) {
+  const settings = readJSON('settings', {});
 
-  if (!groups[groupId] || !Array.isArray(groups[groupId].badwords)) {
-    return false;
-  }
+  settings.badWords = (settings.badWords || [])
+    .filter(item => item !== word);
 
-  const normalized = String(word).toLowerCase().trim();
-  const previousLength = groups[groupId].badwords.length;
-
-  groups[groupId].badwords =
-    groups[groupId].badwords.filter(item => item !== normalized);
-
-  if (groups[groupId].badwords.length === previousLength) {
-    return false;
-  }
-
-  return writeDatabase('groups', groups);
-}
-
-function normalizeWhatsAppId(userId) {
-  return `${String(userId).split('@')[0]}@s.whatsapp.net`;
+  writeJSON('settings', settings);
+  return settings.badWords;
 }
 
 function muteUser(groupId, userId) {
-  const muted = readDatabase('muted');
+  const muted = readJSON('muted', {});
 
-  if (!Array.isArray(muted[groupId])) {
-    muted[groupId] = [];
+  if (!muted[groupId]) muted[groupId] = [];
+
+  if (!muted[groupId].includes(userId)) {
+    muted[groupId].push(userId);
   }
 
-  const normalized = normalizeWhatsAppId(userId);
-
-  if (!muted[groupId].includes(normalized)) {
-    muted[groupId].push(normalized);
-    writeDatabase('muted', muted);
-  }
-
+  writeJSON('muted', muted);
   return true;
 }
 
 function unmuteUser(groupId, userId) {
-  const muted = readDatabase('muted');
+  const muted = readJSON('muted', {});
 
-  if (!Array.isArray(muted[groupId])) {
-    return false;
-  }
+  muted[groupId] = (muted[groupId] || [])
+    .filter(id => id !== userId);
 
-  const normalized = normalizeWhatsAppId(userId);
-  const previousLength = muted[groupId].length;
-
-  muted[groupId] = muted[groupId].filter(id => id !== normalized);
-
-  if (muted[groupId].length === previousLength) {
-    return false;
-  }
-
-  return writeDatabase('muted', muted);
+  writeJSON('muted', muted);
+  return true;
 }
 
 function isUserMuted(groupId, userId) {
-  const muted = readDatabase('muted');
-
-  if (!Array.isArray(muted[groupId])) {
-    return false;
-  }
-
-  return muted[groupId].includes(normalizeWhatsAppId(userId));
+  const muted = readJSON('muted', {});
+  return (muted[groupId] || []).includes(userId);
 }
 
 function getMutedUsers(groupId) {
-  const muted = readDatabase('muted');
-
-  return muted[groupId] || [];
+  const muted = readJSON('muted', {});
+  return groupId ? (muted[groupId] || []) : muted;
 }
 
 function getBotMode() {
-  const data = readDatabase('botmode');
+  const data = readJSON('botmode', {
+    mode: 'public'
+  });
+
   return data.mode || 'public';
 }
 
 function setBotMode(mode) {
   if (!VALID_BOT_MODES.includes(mode)) {
-    throw new Error(`Invalid mode: ${mode}`);
+    throw new Error('Invalid bot mode');
   }
 
-  return writeDatabase('botmode', { mode });
+  writeJSON('botmode', { mode });
+  return mode;
 }
 
 function getBotSetting(key) {
-  const settings = readDatabase('bot-settings');
+  const settings = {
+    ...BOT_SETTINGS_DEFAULTS,
+    ...readJSON('settings', {})
+  };
 
-  if (Object.prototype.hasOwnProperty.call(settings, key)) {
-    return settings[key];
-  }
-
-  return BOT_SETTINGS_DEFAULTS[key];
+  return settings[key];
 }
 
 function setBotSetting(key, value) {
-  const settings = readDatabase('bot-settings');
+  const settings = readJSON('settings', {});
 
   settings[key] = value;
+  writeJSON('settings', settings);
 
-  return writeDatabase('bot-settings', settings);
+  return value;
 }
 
 function getAllBotSettings() {
   return {
     ...BOT_SETTINGS_DEFAULTS,
-    ...readDatabase('bot-settings')
+    ...readJSON('settings', {})
   };
 }
 
 function updateBotSettings(updates) {
-  const settings = readDatabase('bot-settings');
+  const settings = {
+    ...readJSON('settings', {}),
+    ...updates
+  };
 
-  Object.assign(settings, updates);
-
-  return writeDatabase('bot-settings', settings);
+  writeJSON('settings', settings);
+  return getAllBotSettings();
 }
 
 function getAntiforwardSettings(groupId) {
-  const settings = getGroupSettings(groupId);
-
-  return {
-    antiforward: settings.antiforward === true,
-    antiforwardAction: settings.antiforwardAction || 'delete',
-    antiforwardWarnings: settings.antiforwardWarnings || {},
-    antiforwardMaxWarnings: settings.antiforwardMaxWarnings || 3
+  const data = readJSON('antiforward', {});
+  return data[groupId] || {
+    enabled: false,
+    action: 'delete'
   };
 }
 
-function updateAntiforwardSettings(
-  groupId,
-  enabled,
-  action = 'delete',
-  maxWarnings = 3
-) {
-  const groups = readDatabase('groups');
+function updateAntiforwardSettings(groupId, updates) {
+  const data = readJSON('antiforward', {});
 
-  if (!groups[groupId]) {
-    groups[groupId] = {
-      ...config.defaultGroupSettings
-    };
-  }
+  data[groupId] = {
+    ...(data[groupId] || {}),
+    ...updates
+  };
 
-  groups[groupId].antiforward = enabled;
-  groups[groupId].antiforwardAction = action;
-  groups[groupId].antiforwardMaxWarnings = maxWarnings;
-
-  return writeDatabase('groups', groups);
+  writeJSON('antiforward', data);
+  return data[groupId];
 }
 
 function addAntiforwardWarning(groupId, userId) {
-  const groups = readDatabase('groups');
+  const data = readJSON('antiforwardWarnings', {});
 
-  if (!groups[groupId]) {
-    groups[groupId] = {
-      ...config.defaultGroupSettings
-    };
-  }
+  if (!data[groupId]) data[groupId] = {};
 
-  if (!groups[groupId].antiforwardWarnings) {
-    groups[groupId].antiforwardWarnings = {};
-  }
+  data[groupId][userId] =
+    (data[groupId][userId] || 0) + 1;
 
-  const warnings = groups[groupId].antiforwardWarnings;
-
-  warnings[userId] = (warnings[userId] || 0) + 1;
-
-  writeDatabase('groups', groups);
-
-  return warnings[userId];
+  writeJSON('antiforwardWarnings', data);
+  return data[groupId][userId];
 }
 
 function getAntiforwardWarningCount(groupId, userId) {
-  const groups = readDatabase('groups');
-
-  return groups[groupId]?.antiforwardWarnings?.[userId] || 0;
+  const data = readJSON('antiforwardWarnings', {});
+  return data[groupId]?.[userId] || 0;
 }
 
 function clearAntiforwardWarning(groupId, userId) {
-  const groups = readDatabase('groups');
+  const data = readJSON('antiforwardWarnings', {});
 
-  if (!groups[groupId]?.antiforwardWarnings) {
-    return false;
+  if (data[groupId]) {
+    delete data[groupId][userId];
   }
 
-  delete groups[groupId].antiforwardWarnings[userId];
-
-  return writeDatabase('groups', groups);
+  writeJSON('antiforwardWarnings', data);
 }
 
-function clearAllAntiforwardWarnings(groupId, userId) {
-  const groups = readDatabase('groups');
+function clearAllAntiforwardWarnings(groupId) {
+  const data = readJSON('antiforwardWarnings', {});
 
-  if (!groups[groupId]?.antiforwardWarnings) {
-    return false;
-  }
+  delete data[groupId];
 
-  groups[groupId].antiforwardWarnings[userId] = 0;
-
-  return writeDatabase('groups', groups);
+  writeJSON('antiforwardWarnings', data);
 }
 
-function saveSession(sessionFile) {
-  try {
-    if (!fs.existsSync(sessionFile)) {
-      return false;
+function saveSession(userId, session) {
+  const data = readJSON('session', {});
+
+  data[userId] = session;
+
+  writeJSON('session', data);
+  return session;
+}
+
+function getSession(userId) {
+  const data = readJSON('session', {});
+  return userId ? data[userId] : data;
+}
+
+function clearSession(userId) {
+  const data = readJSON('session', {});
+
+  if (userId) {
+    delete data[userId];
+  } else {
+    for (const key of Object.keys(data)) {
+      delete data[key];
     }
-
-    const content = fs.readFileSync(sessionFile);
-    const session = readDatabase('session');
-
-    session.creds = content.toString('base64');
-    session.savedAt = Date.now();
-
-    return writeDatabase('session', session);
-  } catch (error) {
-    console.error('[SESSION-DB] saveSession error:', error.message);
-    return false;
   }
-}
 
-function getSession() {
-  try {
-    const session = readDatabase('session');
-    return session.creds || null;
-  } catch (error) {
-    console.error('[SESSION-DB] getSession error:', error.message);
-    return null;
-  }
-}
-
-function clearSession() {
-  return writeDatabase('session', {});
+  writeJSON('session', data);
 }
 
 function loadSettings() {
-  return {
-    enabled: getBotSetting('autoStatusView') || false,
-    react: getBotSetting('autoStatusReact') || false,
-    emoji: getBotSetting('autoStatusEmoji') || '💚',
-    emojiPool: getBotSetting('autoStatusEmojiPool') || [],
-    randomEmoji: getBotSetting('autoStatusRandomEmoji') || false
-  };
+  return readJSON('settingsFile', {});
 }
 
 function saveSettings(settings) {
-  return updateBotSettings({
-    autoStatusView: !!settings.enabled,
-    autoStatusReact: !!settings.react,
-    autoStatusEmoji: settings.emoji || '',
-    autoStatusEmojiPool: settings.emojiPool || [],
-    autoStatusRandomEmoji: !!settings.randomEmoji
-  });
+  return writeJSON('settingsFile', settings);
 }
 
-function cleanEmoji(value) {
-  return String(value).replace(
-    /[\u{FE00}-\u{FE0F}\u{E0100}-\u{E01EF}\u200D\u200B\uFEFF]/gu,
+function cleanEmoji(text) {
+  return String(text || '').replace(
+    /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/gu,
     ''
-  ).trim();
+  );
 }
 
-function pickEmoji(settings) {
-  if (
-    settings.randomEmoji &&
-    Array.isArray(settings.emojiPool) &&
-    settings.emojiPool.length
-  ) {
-    return settings.emojiPool[
-      Math.floor(Math.random() * settings.emojiPool.length)
-    ];
-  }
+function pickEmoji(items) {
+  if (!Array.isArray(items) || items.length === 0) return '';
 
-  return settings.emoji;
+  return items[Math.floor(Math.random() * items.length)];
 }
 
 module.exports = {
@@ -676,6 +445,7 @@ module.exports = {
 
   getGroupSettings,
   updateGroupSettings,
+
   getUser,
   updateUser,
 
