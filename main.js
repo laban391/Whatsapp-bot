@@ -17,21 +17,21 @@
 //                                                                                                                                                                                        //
 //════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════//
 //* 
-//  * project_name : GAAJU-XMD
-//  * author : gaajutech
+//  * project_name : LABAN-XMD
+//  * author : laban
 //  * youtube : https://www.youtube.com/Xchristech 
-//  * description : GAAJU-XMD ,A Multi-Device whatsapp user bot.
+//  * description : LABAN-XMD ,A Multi-Device whatsapp user bot.
 //*
 //*
 //re-upload? recode? copy code? give credit to gaajutech 2026:)
-//Instagram: gaajutech
+//Instagram: laban
 //Telegram: t.me/Official_ChrisGaaju
-//GitHub: Xchristech2 
-//WhatsApp: +2348069675806
+//GitHub: laban
+//WhatsApp: +254708700675
 //want more free bot scripts? subscribe to my youtube channel: https://youtube.com/@Xchristech
 //   * Created By Github: gaajutechh.
 //   * Credit To chris gaaju
-//   * © 2026 GAAJU-XMD.
+//   * © 2026 LABAN-XMD.
 // ⛥┌┤
 // */
 // 🧹 Fix for ENOSPC / temp overflow in hosted panels
@@ -319,7 +319,7 @@ const channelInfo = {
         isForwarded: true,
         forwardedNewsletterMessageInfo: {
             newsletterJid: '120363406588763460@newsletter',
-            newsletterName: 'GAAJU-XMD',
+            newsletterName: 'LABAN-XMD',
             serverMessageId: -1
         }
     }
@@ -743,7 +743,7 @@ try {
                 isForwarded: true,
                 forwardedNewsletterMessageInfo: {
                     newsletterJid: '120363406588763460@newsletter',
-                    newsletterName: 'ɢᴀᴀᴊᴜ-xᴍᴅ',
+                    newsletterName: 'LABAN-xᴍᴅ',
                     serverMessageId: -1
                 }
             }
@@ -1273,7 +1273,7 @@ case userMessage === '.confighelp':
                     }
                     
                     let botInfoText = `🤖 *BOT INFORMATION*\n\n` +
-                                    `*Name:* ${settings.botName || 'GAAJU-XMD'}\n` +
+                                    `*Name:* ${settings.botName || 'LABAN-XMD'}\n` +
                                     `*Version:* v${settings.version}\n` +
                                     `*Platform:* ${global.deploymentPlatform}\n` +
                                     `*Node.js:* ${process.version}\n` +
