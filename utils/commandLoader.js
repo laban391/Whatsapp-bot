@@ -1,64 +1,45 @@
+/**
+ * Command Loader - Separate module to avoid circular dependencies
+ */
 
 const fs = require('fs');
 const path = require('path');
 
-const commands = new Map();
-
-function loadCommands() {
-    commands.clear();
-
-    const commandsDir = path.join(__dirname, '..', 'commands');
-
-    if (!fs.existsSync(commandsDir)) {
-        console.error('[COMMANDS] Commands directory not found:', commandsDir);
-        return commands;
-    }
-
-    const files = fs.readdirSync(commandsDir)
-        .filter(file => file.endsWith('.js'));
-
-    for (const file of files) {
-        const filePath = path.join(commandsDir, file);
-
-        try {
-            delete require.cache[require.resolve(filePath)];
-
-            const command = require(filePath);
-
-            if (!command || typeof command !== 'object') {
-                console.warn(`[COMMANDS] Invalid command skipped: ${file}`);
-                continue;
-            }
-
-            const name = command.command || command.name;
-
-            if (!name) {
-                console.warn(`[COMMANDS] No command name found: ${file}`);
-                continue;
-            }
-
-            const names = Array.isArray(name) ? name : [name];
-
-            for (const commandName of names) {
-                commands.set(String(commandName).toLowerCase(), command);
-            }
-
-            console.log(`[COMMANDS] Loaded: ${file}`);
-        } catch (error) {
-            console.error(`[COMMANDS] Failed to load ${file}:`, error.message);
-        }
-    }
-
-    console.log(`[COMMANDS] Loaded ${commands.size} command names.`);
+// Load all commands
+const loadCommands = () => {
+  const commands = new Map();
+  const commandsPath = path.join(__dirname, '..', 'commands');
+  if (!fs.existsSync(commandsPath)) {
+    console.log('Commands directory not found');
     return commands;
-}
-
-function getCommand(name) {
-    return commands.get(String(name).toLowerCase());
-}
-
+  }
+  const categories = fs.readdirSync(commandsPath);
+  categories.forEach(category => {
+    const categoryPath = path.join(commandsPath, category);
+    if (fs.statSync(categoryPath).isDirectory()) {
+      const files = fs.readdirSync(categoryPath).filter(f => f.endsWith('.js'));
+      files.forEach(file => {
+        try {
+          const exported = require(path.join(categoryPath, file));
+          const cmds = Array.isArray(exported) ? exported : [exported];
+          cmds.forEach(command => {
+            if (command && command.name) {
+              commands.set(command.name, command);
+              if (command.aliases) {
+                command.aliases.forEach(alias => {
+                  commands.set(alias, command);
+                });
+              }
+            }
+          });
+        } catch (error) {
+          console.error(`Error loading command ${file}:`, error.message);
+        }
+      });
+    }
+  });
+  return commands;
+};
 module.exports = {
-    commands,
-    loadCommands,
-    getCommand
+  loadCommands
 };
