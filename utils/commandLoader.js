@@ -1,87 +1,214 @@
 
 /**
  * LABAN-XMD Command Loader
- * Compatible with original GAAJU-MD command structure
+ *
+ * Recursively loads commands from the commands directory.
+ * Supports:
+ * - Nested command folders
+ * - Commands in the root commands folder
+ * - Single command exports
+ * - Arrays of command exports
+ * - String aliases
+ * - Array aliases
+ *
+ * Original command files remain unchanged.
  */
 
 const fs = require('fs');
 const path = require('path');
 
-const loadCommands = () => {
-    const commands = new Map();
-    const commandsPath = path.join(__dirname, '..', 'commands');
+function normalizeName(value) {
+    return typeof value === 'string'
+        ? value.trim().toLowerCase()
+        : '';
+}
 
-    if (!fs.existsSync(commandsPath)) {
-        console.error('[COMMANDS] Commands directory not found');
+function getCommandExports(exported) {
+    if (Array.isArray(exported)) {
+        return exported;
+    }
+
+    if (
+        exported &&
+        typeof exported === 'object' &&
+        exported.default
+    ) {
+        return getCommandExports(exported.default);
+    }
+
+    return exported && typeof exported === 'object'
+        ? [exported]
+        : [];
+}
+
+function getAliases(aliases) {
+    if (Array.isArray(aliases)) {
+        return aliases;
+    }
+
+    if (typeof aliases === 'string') {
+        return [aliases];
+    }
+
+    return [];
+}
+
+function loadCommands() {
+    const commands = new Map();
+
+    const commandRoot = path.join(
+        __dirname,
+        '..',
+        'commands'
+    );
+
+    const discovered = [];
+    const canonicalNames = new Map();
+
+    if (!fs.existsSync(commandRoot)) {
+        console.error(
+            `[COMMANDS] Commands directory not found: ${commandRoot}`
+        );
+
         return commands;
     }
 
-    function loadDirectory(directory) {
-        const files = fs.readdirSync(directory);
+    function walk(directory) {
+        let entries;
 
-        for (const file of files) {
-            const fullPath = path.join(directory, file);
+        try {
+            entries = fs.readdirSync(directory, {
+                withFileTypes: true
+            }).sort((a, b) =>
+                a.name.localeCompare(b.name)
+            );
+        } catch (error) {
+            console.error(
+                `[COMMANDS] Cannot read ${directory}: ${error.message}`
+            );
+
+            return;
+        }
+
+        for (const entry of entries) {
+            const fullPath = path.join(
+                directory,
+                entry.name
+            );
+
+            if (entry.isDirectory()) {
+                walk(fullPath);
+                continue;
+            }
+
+            if (
+                !entry.isFile() ||
+                !entry.name.toLowerCase().endsWith('.js')
+            ) {
+                continue;
+            }
 
             try {
-                const stat = fs.statSync(fullPath);
-
-                if (stat.isDirectory()) {
-                    loadDirectory(fullPath);
-                    continue;
-                }
-
-                if (!file.endsWith('.js')) continue;
-
-                delete require.cache[require.resolve(fullPath)];
-
                 const exported = require(fullPath);
-                const cmds = Array.isArray(exported)
-                    ? exported
-                    : [exported];
+                const items = getCommandExports(exported);
 
-                for (const command of cmds) {
-                    if (!command || !command.name) {
-                        console.warn(`[COMMANDS] Invalid command: ${file}`);
+                for (const command of items) {
+                    if (
+                        !command ||
+                        typeof command !== 'object'
+                    ) {
                         continue;
                     }
 
-                    const names = [
-                        command.name,
-                        ...(Array.isArray(command.aliases)
-                            ? command.aliases
-                            : command.aliases
-                                ? [command.aliases]
-                                : [])
-                    ];
+                    const name = normalizeName(command.name);
 
-                    for (const name of names) {
-                        const key = String(name).toLowerCase().trim();
-
-                        if (!key) continue;
-
-                        commands.set(key, command);
+                    if (!name) {
+                        continue;
                     }
+
+                    if (typeof command.execute !== 'function') {
+                        console.error(
+                            `[COMMANDS] Skipped "${name}" in ${path.relative(commandRoot, fullPath)}: execute() is missing.`
+                        );
+
+                        continue;
+                    }
+
+                    const relativeFile = path.relative(
+                        commandRoot,
+                        fullPath
+                    );
+
+                    if (canonicalNames.has(name)) {
+                        console.error(
+                            `[COMMANDS] Duplicate command "${name}" in ${relativeFile}; keeping ${canonicalNames.get(name)}.`
+                        );
+
+                        continue;
+                    }
+
+                    canonicalNames.set(name, relativeFile);
+
+                    discovered.push({
+                        name,
+                        command,
+                        aliases: getAliases(command.aliases),
+                        file: relativeFile
+                    });
                 }
-
-                console.log(`[COMMANDS] Loaded: ${file}`);
-
             } catch (error) {
                 console.error(
-                    `[COMMANDS] Error loading ${file}:`,
-                    error.stack || error.message
+                    `[COMMANDS] Failed to load ${path.relative(commandRoot, fullPath)}:`,
+                    error && error.stack
+                        ? error.stack
+                        : error
                 );
             }
         }
     }
 
-    loadDirectory(commandsPath);
+    walk(commandRoot);
+
+    // Register command names first.
+    for (const item of discovered) {
+        commands.set(item.name, item.command);
+    }
+
+    // Register aliases without overwriting real command names.
+    for (const item of discovered) {
+        for (const rawAlias of item.aliases) {
+            const alias = normalizeName(rawAlias);
+
+            if (!alias || alias === item.name) {
+                continue;
+            }
+
+            if (canonicalNames.has(alias)) {
+                console.warn(
+                    `[COMMANDS] Alias "${alias}" from ${item.file} conflicts with a real command.`
+                );
+
+                continue;
+            }
+
+            if (commands.has(alias)) {
+                console.warn(
+                    `[COMMANDS] Duplicate alias "${alias}" from ${item.file}; first command kept.`
+                );
+
+                continue;
+            }
+
+            commands.set(alias, item.command);
+        }
+    }
 
     console.log(
-        `[COMMANDS] Successfully registered ${commands.size} command names.`
+        `[COMMANDS] Loaded ${discovered.length} command modules; registered ${commands.size} command names/aliases.`
     );
 
     return commands;
-};
+}
 
 module.exports = {
     loadCommands
