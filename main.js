@@ -1,38 +1,39 @@
 
 'use strict';
 
-// Connect the original GAAJU-MD handlers.
-const {
-  handleMessage: originalHandleMessage,
-  handleGroupUpdate: originalHandleGroupUpdate
-} = require('./handler');
+const handler = require('./handler');
+const database = require('./database');
 
-/**
- * Process incoming WhatsApp messages for a bot session.
- *
- * @param {object} sock - The Baileys socket for this session.
- * @param {object} msg - The incoming WhatsApp message.
- */
 async function handleMessage(sock, msg) {
   if (!sock || !msg) {
-    throw new Error('Socket and message are required.');
+    throw new Error('Socket and message are required');
   }
 
-  return originalHandleMessage(sock, msg);
+  const tenantId = sock.__tenantId;
+
+  if (!tenantId) {
+    throw new Error('This WhatsApp socket has no tenant ID');
+  }
+
+  return database.runWithTenant(tenantId, async () => {
+    return handler.handleMessage(sock, msg);
+  });
 }
 
-/**
- * Process WhatsApp group participant updates.
- *
- * @param {object} sock - The Baileys socket for this session.
- * @param {object} update - The group participant update.
- */
 async function handleGroupUpdate(sock, update) {
   if (!sock || !update) {
-    throw new Error('Socket and group update are required.');
+    throw new Error('Socket and group update are required');
   }
 
-  return originalHandleGroupUpdate(sock, update);
+  const tenantId = sock.__tenantId;
+
+  if (!tenantId) {
+    throw new Error('This WhatsApp socket has no tenant ID');
+  }
+
+  return database.runWithTenant(tenantId, async () => {
+    return handler.handleGroupUpdate(sock, update);
+  });
 }
 
 module.exports = {
