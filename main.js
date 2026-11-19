@@ -4,36 +4,46 @@
 const handler = require('./handler');
 const database = require('./database');
 
-async function handleMessage(sock, msg) {
-  if (!sock || !msg) {
-    throw new Error('Socket and message are required');
-  }
+async function handleMessage(sock, message) {
+  if (!sock || !message) return;
 
   const tenantId = sock.__tenantId;
 
   if (!tenantId) {
-    throw new Error('This WhatsApp socket has no tenant ID');
+    throw new Error('WhatsApp socket has no tenant ID');
   }
 
-  return database.runWithTenant(tenantId, async () => {
-    return handler.handleMessage(sock, msg);
-  });
+  if (typeof handler.handleMessage !== 'function') {
+    throw new Error(
+      'handler.js must export handleMessage(sock, message)'
+    );
+  }
+
+  return database.runWithTenant(
+    tenantId,
+    () => handler.handleMessage(sock, message)
+  );
 }
 
 async function handleGroupUpdate(sock, update) {
-  if (!sock || !update) {
-    throw new Error('Socket and group update are required');
-  }
+  if (!sock || !update) return;
 
   const tenantId = sock.__tenantId;
 
   if (!tenantId) {
-    throw new Error('This WhatsApp socket has no tenant ID');
+    throw new Error('WhatsApp socket has no tenant ID');
   }
 
-  return database.runWithTenant(tenantId, async () => {
-    return handler.handleGroupUpdate(sock, update);
-  });
+  if (typeof handler.handleGroupUpdate !== 'function') {
+    throw new Error(
+      'handler.js must export handleGroupUpdate(sock, update)'
+    );
+  }
+
+  return database.runWithTenant(
+    tenantId,
+    () => handler.handleGroupUpdate(sock, update)
+  );
 }
 
 module.exports = {
