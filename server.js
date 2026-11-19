@@ -7,911 +7,826 @@ const crypto = require('crypto');
 const pino = require('pino');
 
 const {
-    default: makeWASocket,
-    DisconnectReason,
-    fetchLatestBaileysVersion,
-    makeCacheableSignalKeyStore,
-    Browsers,
-    BufferJSON,
-    initAuthCreds,
-    proto
+  default: makeWASocket,
+  DisconnectReason,
+  fetchLatestBaileysVersion,
+  makeCacheableSignalKeyStore,
+  Browsers,
+  BufferJSON,
+  initAuthCreds,
+  proto
 } = require('@whiskeysockets/baileys');
 
 const {
-    handleMessage,
-    handleGroupUpdate
+  handleMessage,
+  handleGroupUpdate
 } = require('./main');
 
-const app = express();
-app.use(express.json());
+// ======================================================
+// 1. CONFIGURATION
+// ======================================================
 
-// ==================================================
-// 1. DATABASE CONNECTION
-// ==================================================
+const PORT = process.env.PORT || 3000;
 
-// ENTER YOUR NEW ATLAS USERNAME AND PASSWORD BELOW.
-// Keep this file private. Never upload it publicly.
-
+// Replace YOUR_USERNAME and YOUR_NEW_PASSWORD.
+// URL-encode special characters in the password.
 const MONGO_URI =
-    'mongodb+srv://labanlaby34_db_user:labanlabanlaban@whatsapp.xv0gpkv.mongodb.net/';
+  'mongodb+srv://labanlaby34_db_user:labanlabanlaban@whatsapp.xv0gpkv.mongodb.net/';
+
+const logger = pino({ level: 'silent' });
 
 mongoose.set('strictQuery', true);
 
-// ==================================================
+// ======================================================
 // 2. DATABASE MODELS
-// ==================================================
+// ======================================================
 
 const SessionSchema = new mongoose.Schema({
-    userId: {
-        type: String,
-        unique: true,
-        required: true
-    },
-    phoneNumber: {
-        type: String,
-        unique: true,
-        required: true
-    },
-    isConnected: {
-        type: Boolean,
-        default: false
-    }
-}, { timestamps: true });
+  userId: {
+    type: String,
+    required: true,
+    unique: true,
+    index: true
+  },
+  phoneNumber: {
+    type: String,
+    required: true,
+    unique: true,
+    index: true
+  },
+  isConnected: {
+    type: Boolean,
+    default: false
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now
+  },
+  updatedAt: {
+    type: Date,
+    default: Date.now
+  }
+});
 
 const UserSession =
-    mongoose.models.UserSession ||
-    mongoose.model('UserSession', SessionSchema);
+  mongoose.models.UserSession ||
+  mongoose.model('UserSession', SessionSchema);
 
-const AuthSchema = new mongoose.Schema({
-    userId: {
-        type: String,
-        required: true
-    },
-    key: {
-        type: String,
-        required: true
-    },
-    value: {
-        type: String,
-        required: true
-    }
-}, { timestamps: true });
+const AuthDataSchema = new mongoose.Schema({
+  userId: {
+    type: String,
+    required: true,
+    index: true
+  },
+  key: {
+    type: String,
+    required: true
+  },
+  value: {
+    type: mongoose.Schema.Types.Mixed,
+    required: true
+  }
+});
 
-AuthSchema.index(
-    { userId: 1, key: 1 },
-    { unique: true }
+AuthDataSchema.index(
+  { userId: 1, key: 1 },
+  { unique: true }
 );
 
 const AuthData =
-    mongoose.models.AuthData ||
-    mongoose.model('AuthData', AuthSchema);
+  mongoose.models.AuthData ||
+  mongoose.model('AuthData', AuthDataSchema);
 
-// ==================================================
-// 3. GLOBAL SETTINGS
-// ==================================================
+// ======================================================
+// 3. MONGODB AUTHENTICATION STORAGE
+// ======================================================
+
+async function useMongoAuthState(userId) {
+  let credsDocument = await AuthData.findOne({
+    userId,
+    key: '__creds__'
+  }).lean();
+
+  let creds = credsDocument
+    ? credsDocument.value
+    : initAuthCreds();
+
+  async function saveKey(key, value) {
+    const id = {
+      userId,
+      key
+    };
+
+    if (value === null || value === undefined) {
+      await AuthData.deleteOne(id);
+      return;
+    }
+
+    await AuthData.updateOne(
+      id,
+      {
+        $set: { value }
+      },
+      { upsert: true }
+    );
+  }
+
+  const keyStore = {
+    get: async (type, ids) => {
+      const result = {};
+
+      await Promise.all(
+        ids.map(async id => {
+          const key = `${type}-${id}`;
+
+          const document = await AuthData.findOne({
+            userId,
+            key
+          }).lean();
+
+          if (document) {
+            let value = document.value;
+
+            if (type === 'app-state-sync-key') {
+              value = proto.Message.AppStateSyncKeyData.fromObject(
+                value
+              );
+            }
+
+            result[id] = value;
+          }
+        })
+      );
+
+      return result;
+    },
+
+    set: async data => {
+      const operations = [];
+
+      for (const category of Object.keys(data)) {
+        for (const id of Object.keys(data[category])) {
+          const value = data[category][id];
+          const key = `${category}-${id}`;
+
+          if (value === null || value === undefined) {
+            operations.push({
+              deleteOne: {
+                filter: { userId, key }
+              }
+            });
+          } else {
+            operations.push({
+              updateOne: {
+                filter: { userId, key },
+                update: { $set: { value } },
+                upsert: true
+              }
+            });
+          }
+        }
+      }
+
+      if (operations.length) {
+        await AuthData.bulkWrite(operations);
+      }
+    }
+  };
+
+  return {
+    state: {
+      creds,
+      keys: makeCacheableSignalKeyStore(
+        keyStore,
+        logger
+      )
+    },
+
+    saveCreds: async () => {
+      await saveKey('__creds__', creds);
+    }
+  };
+}
+
+// ======================================================
+// 4. ACTIVE BOT MANAGEMENT
+// ======================================================
 
 const activeBots = new Map();
 const activeNumbers = new Map();
 const pairingRequests = new Set();
+const reconnectTimers = new Map();
 
-const logger = pino({ level: 'silent' });
+const MAX_PAIRING_REQUESTS_PER_IP = 5;
+const pairingAttempts = new Map();
 
-const PORT = process.env.PORT || 3000;
-
-const RATE_LIMIT = new Map();
-const RATE_LIMIT_WINDOW = 60 * 1000;
-const MAX_REQUESTS = 5;
-
-// ==================================================
-// 4. HELPER FUNCTIONS
-// ==================================================
-
-function createSessionId() {
-    return crypto.randomUUID();
+function normalizePhoneNumber(number) {
+  return String(number || '').replace(/\D/g, '');
 }
 
-function normalizePhone(number) {
-    return String(number || '').replace(/\D/g, '');
+function isValidPhoneNumber(number) {
+  return /^[1-9]\d{7,14}$/.test(number);
 }
 
-function validPhone(number) {
-    return /^[0-9]{8,15}$/.test(number);
+function getUserId(phoneNumber) {
+  return `user_${phoneNumber}`;
 }
 
-// ==================================================
-// 5. RATE LIMITING
-// ==================================================
+function getPairingCode(sock, phoneNumber) {
+  return new Promise(async (resolve, reject) => {
+    let completed = false;
 
-function checkRateLimit(req, res, next) {
-    const ip =
-        req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
-        req.socket.remoteAddress ||
-        'unknown';
+    const timeout = setTimeout(() => {
+      if (!completed) {
+        completed = true;
+        reject(new Error('Pairing code request timed out'));
+      }
+    }, 45000);
 
-    const now = Date.now();
+    try {
+      const code = await sock.requestPairingCode(phoneNumber);
 
-    let record = RATE_LIMIT.get(ip);
+      if (!completed) {
+        completed = true;
+        clearTimeout(timeout);
+        resolve(code);
+      }
+    } catch (error) {
+      clearTimeout(timeout);
 
-    if (!record || now - record.start > RATE_LIMIT_WINDOW) {
-        record = { start: now, count: 0 };
+      if (!completed) {
+        completed = true;
+        reject(error);
+      }
     }
-
-    record.count++;
-    RATE_LIMIT.set(ip, record);
-
-    if (record.count > MAX_REQUESTS) {
-        return res.status(429).json({
-            error: 'Too many requests. Please wait one minute.'
-        });
-    }
-
-    next();
+  });
 }
 
-// ==================================================
-// 6. MONGODB AUTHENTICATION STORAGE
-// ==================================================
+// ======================================================
+// 5. CONNECT A CUSTOMER BOT
+// ======================================================
 
-async function useMongoAuthState(userId) {
+async function connectBot(phoneNumber, userId, onCode) {
+  if (activeBots.has(userId)) {
+    throw new Error('This bot is already running');
+  }
 
-    const encode = value =>
-        JSON.stringify(value, BufferJSON.replacer);
+  const auth = await useMongoAuthState(userId);
 
-    const decode = value =>
-        JSON.parse(value, BufferJSON.reviver);
+  const { version } = await fetchLatestBaileysVersion();
 
-    const savedCreds = await AuthData.findOne({
-        userId,
-        key: '__creds__'
-    });
+  const sock = makeWASocket({
+    version,
+    logger,
+    printQRInTerminal: false,
+    browser: Browsers.macOS('Safari'),
+    auth: auth.state,
+    generateHighQualityLinkPreview: true,
+    markOnlineOnConnect: false,
+    syncFullHistory: false
+  });
 
-    const creds = savedCreds
-        ? decode(savedCreds.value)
-        : initAuthCreds();
+  // IMPORTANT: Used by main.js to isolate each customer's data.
+  sock.__tenantId = userId;
 
-    const saveCreds = async () => {
-        await AuthData.updateOne(
-            { userId, key: '__creds__' },
-            { $set: { value: encode(creds) } },
-            { upsert: true }
-        );
-    };
+  const bot = {
+    sock,
+    phoneNumber,
+    userId,
+    connected: false,
+    intentionalDisconnect: false,
+    pairingCodeSent: false
+  };
 
-    const keys = {
+  activeBots.set(userId, bot);
+  activeNumbers.set(phoneNumber, userId);
 
-        get: async (type, ids) => {
-            const result = {};
+  sock.ev.on('creds.update', async () => {
+    try {
+      await auth.saveCreds();
+    } catch (error) {
+      console.error('[AUTH] Save error:', error.message);
+    }
+  });
 
-            if (!ids.length) return result;
+  sock.ev.on('connection.update', async update => {
+    const { connection, lastDisconnect } = update;
 
-            const dbKeys = ids.map(
-                id => `${type}:${id}`
-            );
+    if (connection === 'open') {
+      bot.connected = true;
+      bot.pairingCodeSent = false;
 
-            const documents = await AuthData.find({
-                userId,
-                key: { $in: dbKeys }
-            });
-
-            for (const doc of documents) {
-                const id = doc.key.substring(type.length + 1);
-
-                let value = decode(doc.value);
-
-                if (
-                    type === 'app-state-sync-key' &&
-                    value
-                ) {
-                    value =
-                        proto.Message.AppStateSyncKeyData.fromObject(value);
-                }
-
-                result[id] = value;
-            }
-
-            return result;
+      await UserSession.updateOne(
+        { userId },
+        {
+          $set: {
+            phoneNumber,
+            isConnected: true,
+            updatedAt: new Date()
+          }
         },
+        { upsert: true }
+      );
 
-        set: async data => {
-            const operations = [];
+      console.log(`[BOT] Connected: ${phoneNumber}`);
+    }
 
-            for (const category in data) {
-                for (const id in data[category]) {
+    if (connection === 'close') {
+      bot.connected = false;
 
-                    const value = data[category][id];
-                    const key = `${category}:${id}`;
-
-                    if (value === null || value === undefined) {
-                        operations.push({
-                            deleteOne: {
-                                filter: { userId, key }
-                            }
-                        });
-                    } else {
-                        operations.push({
-                            updateOne: {
-                                filter: { userId, key },
-                                update: {
-                                    $set: { value: encode(value) }
-                                },
-                                upsert: true
-                            }
-                        });
-                    }
-                }
-            }
-
-            if (operations.length) {
-                await AuthData.bulkWrite(
-                    operations,
-                    { ordered: false }
-                );
-            }
+      await UserSession.updateOne(
+        { userId },
+        {
+          $set: {
+            isConnected: false,
+            updatedAt: new Date()
+          }
         }
-    };
+      );
 
-    return {
-        state: { creds, keys },
-        saveCreds
-    };
+      const statusCode =
+        lastDisconnect?.error?.output?.statusCode;
+
+      const loggedOut =
+        statusCode === DisconnectReason.loggedOut;
+
+      console.log(
+        `[BOT] Disconnected: ${phoneNumber}`,
+        statusCode || ''
+      );
+
+      if (loggedOut || bot.intentionalDisconnect) {
+        await deleteUserSession(userId);
+        return;
+      }
+
+      // Reconnect with a delay, without creating duplicate sockets.
+      if (activeBots.get(userId) === bot) {
+        const timer = setTimeout(async () => {
+          reconnectTimers.delete(userId);
+
+          if (activeBots.get(userId) !== bot) return;
+
+          activeBots.delete(userId);
+
+          try {
+            await connectBot(phoneNumber, userId, null);
+          } catch (error) {
+            console.error(
+              `[BOT] Reconnect failed for ${phoneNumber}:`,
+              error.message
+            );
+          }
+        }, 5000);
+
+        reconnectTimers.set(userId, timer);
+      }
+    }
+  });
+
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type !== 'notify') return;
+
+    for (const message of messages || []) {
+      try {
+        await handleMessage(sock, message);
+      } catch (error) {
+        console.error('[MESSAGE] Handler error:', error);
+      }
+    }
+  });
+
+  sock.ev.on('group-participants.update', async update => {
+    try {
+      await handleGroupUpdate(sock, update);
+    } catch (error) {
+      console.error('[GROUP] Handler error:', error);
+    }
+  });
+
+  // Request a pairing code only for a new, unregistered session.
+  if (
+    onCode &&
+    !auth.state.creds.registered
+  ) {
+    try {
+      const code = await getPairingCode(sock, phoneNumber);
+
+      bot.pairingCodeSent = true;
+      onCode(code);
+    } catch (error) {
+      console.error('[PAIRING] Code error:', error.message);
+      throw error;
+    }
+  }
+
+  return bot;
 }
 
-// ==================================================
-// 7. DELETE CUSTOMER SESSION
-// ==================================================
+// ======================================================
+// 6. DELETE CUSTOMER SESSION
+// ======================================================
 
 async function deleteUserSession(userId) {
+  const bot = activeBots.get(userId);
 
-    const bot = activeBots.get(userId);
+  if (bot) {
+    bot.intentionalDisconnect = true;
 
-    if (bot) {
-        bot.stopped = true;
+    try {
+      bot.sock.ev.removeAllListeners();
+      bot.sock.end(undefined);
+    } catch (_) {}
 
-        if (bot.reconnectTimer) {
-            clearTimeout(bot.reconnectTimer);
-        }
+    activeBots.delete(userId);
+    activeNumbers.delete(bot.phoneNumber);
+  }
 
-        try {
-            bot.sock?.end(new Error('Session deleted'));
-        } catch (_) {}
+  const timer = reconnectTimers.get(userId);
 
-        activeBots.delete(userId);
-        activeNumbers.delete(bot.phoneNumber);
-    }
+  if (timer) {
+    clearTimeout(timer);
+    reconnectTimers.delete(userId);
+  }
 
-    await AuthData.deleteMany({ userId });
-    await UserSession.deleteOne({ userId });
+  await UserSession.deleteOne({ userId });
+  await AuthData.deleteMany({ userId });
 
-    console.log(`🗑️ Deleted session: ${userId}`);
+  console.log(`[SESSION] Removed ${userId}`);
 }
 
-// ==================================================
-// 8. LABAN-XMD PAIRING WEBSITE
-// ==================================================
+// ======================================================
+// 7. EXPRESS APPLICATION
+// ======================================================
 
-const htmlPage = `<!DOCTYPE html>
-<html lang="en">
+const app = express();
+
+app.use(express.json({ limit: '10kb' }));
+app.use(express.urlencoded({ extended: false }));
+
+app.get('/', (req, res) => {
+  res.send(`
+<!DOCTYPE html>
+<html>
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LABAN-XMD WhatsApp Bot</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LABAN-XMD Pairing</title>
 <style>
-* { box-sizing: border-box; }
-body {
-    margin: 0;
-    min-height: 100vh;
-    font-family: 'Segoe UI', Arial, sans-serif;
-    background:
-    radial-gradient(circle at 15% 20%, #392078 0%, transparent 40%),
-    radial-gradient(circle at 85% 80%, #075c75 0%, transparent 40%),
-    linear-gradient(135deg, #080b20, #11152f, #080b20);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 20px;
-    color: white;
+*{box-sizing:border-box}
+body{
+  margin:0;
+  min-height:100vh;
+  display:flex;
+  justify-content:center;
+  align-items:center;
+  background:#080d16;
+  color:white;
+  font-family:Arial,sans-serif;
+  padding:20px
 }
-.container {
-    width: 100%;
-    max-width: 430px;
-    padding: 35px 25px;
-    border-radius: 25px;
-    background: rgba(255,255,255,0.07);
-    border: 1px solid rgba(255,255,255,0.15);
-    backdrop-filter: blur(20px);
-    box-shadow: 0 20px 70px rgba(0,0,0,0.4);
-    text-align: center;
+.card{
+  width:100%;
+  max-width:420px;
+  padding:30px;
+  background:#111c2c;
+  border:1px solid #26374e;
+  border-radius:18px;
+  text-align:center
 }
-.logo {
-    width: 85px;
-    height: 85px;
-    margin: auto auto 18px;
-    border-radius: 25px;
-    background: linear-gradient(135deg,#8b5cf6,#06b6d4,#ec4899);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 30px;
-    font-weight: 900;
+h1{color:#38e6b0}
+p{color:#b6c6d8;line-height:1.5}
+input{
+  width:100%;
+  padding:15px;
+  margin:15px 0;
+  border:1px solid #354a60;
+  border-radius:9px;
+  background:#081321;
+  color:white;
+  font-size:16px
 }
-h1 {
-    margin: 0;
-    font-size: 27px;
-    font-weight: 900;
-    background: linear-gradient(90deg,#c084fc,#22d3ee,#f472b6);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
+button{
+  width:100%;
+  padding:15px;
+  border:0;
+  border-radius:9px;
+  background:#13c99a;
+  color:#06130f;
+  font-size:16px;
+  font-weight:bold;
+  cursor:pointer
 }
-.subtitle {
-    color: #b9c2dc;
-    font-size: 13px;
-    margin-top: 10px;
-    letter-spacing: 2px;
+button:disabled{opacity:.5}
+#result{
+  margin-top:20px;
+  overflow-wrap:anywhere;
+  font-size:21px;
+  color:#38e6b0
 }
-.badge {
-    display: inline-block;
-    margin: 20px 0;
-    padding: 8px 16px;
-    border-radius: 30px;
-    background: rgba(139,92,246,0.16);
-    border: 1px solid rgba(139,92,246,0.4);
-    color: #c4b5fd;
-    font-size: 12px;
-}
-.description {
-    color: #d1d5db;
-    font-size: 14px;
-    line-height: 1.6;
-}
-input {
-    width: 100%;
-    padding: 16px;
-    margin-top: 20px;
-    border-radius: 12px;
-    border: 1px solid rgba(255,255,255,0.15);
-    background: rgba(255,255,255,0.08);
-    color: white;
-    font-size: 16px;
-    outline: none;
-    text-align: center;
-}
-input:focus { border-color: #a78bfa; }
-input::placeholder { color: #8993ad; }
-button {
-    width: 100%;
-    padding: 16px;
-    margin-top: 15px;
-    border: none;
-    border-radius: 12px;
-    background: linear-gradient(100deg,#8b5cf6,#06b6d4,#ec4899);
-    color: white;
-    font-size: 15px;
-    font-weight: bold;
-    cursor: pointer;
-}
-button:disabled { opacity: 0.6; cursor: not-allowed; }
-.code-box {
-    display: none;
-    margin-top: 25px;
-    padding: 20px;
-    border-radius: 15px;
-    background: rgba(6,182,212,0.08);
-    border: 1px solid rgba(6,182,212,0.4);
-}
-.code-box h2 {
-    font-size: 29px;
-    letter-spacing: 5px;
-    color: #67e8f9;
-    margin: 15px 0;
-}
-.copy-btn { background: linear-gradient(100deg,#0891b2,#6366f1); }
-.instructions {
-    margin-top: 20px;
-    padding: 15px;
-    background: rgba(255,255,255,0.04);
-    border-radius: 12px;
-    color: #cbd5e1;
-    font-size: 12px;
-    line-height: 1.8;
-}
-.footer { margin-top: 25px; color: #8993ad; font-size: 12px; }
-.footer strong { color: #c4b5fd; }
+.small{font-size:12px;color:#8294a9}
 </style>
 </head>
 <body>
-<div class="container">
-    <div class="logo">LX</div>
-    <h1>LABAN-XMD</h1>
-    <div class="subtitle">WHATSAPP MULTI-BOT</div>
-    <div class="badge">✦ OFFICIAL PAIRING PORTAL ✦</div>
-    <p class="description">
-        Connect your WhatsApp account to
-        Laban-XMD using a secure pairing code.
-    </p>
-    <input type="text" id="number"
-        placeholder="254712345678" autocomplete="tel">
-    <button id="pairButton" onclick="pair()">
-        ✨ GENERATE PAIRING CODE
-    </button>
-    <div class="code-box" id="result">
-        <p>Your WhatsApp pairing code</p>
-        <h2 id="code">Loading...</h2>
-        <button class="copy-btn" onclick="copyCode()">
-            📋 COPY PAIRING CODE
-        </button>
-    </div>
-    <div class="instructions">
-        <strong>HOW TO CONNECT</strong><br>
-        1. Open WhatsApp.<br>
-        2. Go to Linked Devices.<br>
-        3. Select Link with phone number.<br>
-        4. Enter the pairing code above.
-    </div>
-    <div class="footer">
-        POWERED BY <strong>LABAN-XMD</strong><br>
-        © 2026 All Rights Reserved
-    </div>
+<div class="card">
+<h1>LABAN-XMD</h1>
+<p>Connect your WhatsApp account using a pairing code.</p>
+<form id="pairForm">
+<input
+ id="number"
+ type="tel"
+ placeholder="Country code + phone number"
+ required
+ autocomplete="tel"
+>
+<button id="submitButton" type="submit">Get Pairing Code</button>
+</form>
+<div id="result"></div>
+<p class="small">
+Enter your own WhatsApp number, including the country code.
+Never share your pairing code with anyone.
+</p>
 </div>
+
 <script>
-async function pair() {
-    const num = document.getElementById('number').value.trim();
-    const button = document.getElementById('pairButton');
-    const result = document.getElementById('result');
-    const code = document.getElementById('code');
+const form = document.getElementById('pairForm');
+const result = document.getElementById('result');
+const button = document.getElementById('submitButton');
 
-    if (!/^\\d{8,15}$/.test(num)) {
-        alert('Enter a valid phone number with country code.');
-        return;
+form.addEventListener('submit', async event => {
+  event.preventDefault();
+
+  button.disabled = true;
+  result.textContent = 'Generating pairing code...';
+
+  try {
+    const response = await fetch('/pair', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        number: document.getElementById('number').value
+      })
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.error || 'Pairing failed');
     }
 
-    button.disabled = true;
-    button.innerText = 'CONNECTING...';
-    result.style.display = 'block';
-    code.innerText = 'LOADING';
-
-    try {
-        const res = await fetch('/pair?number=' + encodeURIComponent(num));
-        const data = await res.json();
-
-        if (!res.ok || data.error) {
-            code.innerText = '';
-            alert(data.error || 'Pairing failed.');
-        } else {
-            code.innerText = data.code;
-        }
-    } catch (error) {
-        alert('Server connection failed. Please try again.');
-    } finally {
-        button.disabled = false;
-        button.innerText = '✨ GENERATE PAIRING CODE';
-    }
-}
-
-function copyCode() {
-    const code = document.getElementById('code').innerText;
-    if (!code || code === 'LOADING') return;
-
-    navigator.clipboard.writeText(code)
-        .then(() => alert('Pairing code copied!'))
-        .catch(() => alert('Please copy the code manually.'));
-}
+    result.textContent = 'Your pairing code: ' + data.code;
+  } catch (error) {
+    result.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
 </script>
 </body>
-</html>`;
+</html>
+  `);
+});
 
-// ==================================================
-// 9. WEBSITE ROUTES
-// ==================================================
-
-app.get('/', (req, res) => res.send(htmlPage));
+// ======================================================
+// 8. HEALTH CHECK
+// ======================================================
 
 app.get('/ping', (req, res) => {
-    res.send('LABAN-XMD is alive!');
+  res.json({
+    status: 'online',
+    service: 'LABAN-XMD',
+    activeBots: activeBots.size,
+    uptime: process.uptime()
+  });
 });
 
-// ==================================================
-// 10. CONNECT WHATSAPP BOT
-// ==================================================
+// ======================================================
+// 9. PAIRING ENDPOINT
+// ======================================================
 
-async function connectBot(phoneNumber, userId, bot, onCode = null) {
+app.post('/pair', async (req, res) => {
+  const phoneNumber = normalizePhoneNumber(req.body.number);
 
-    if (bot.stopped) return;
-
-    const generation = (bot.generation || 0) + 1;
-    bot.generation = generation;
-
-    const { state, saveCreds } =
-        await useMongoAuthState(userId);
-
-    const { version } =
-        await fetchLatestBaileysVersion();
-
-    if (bot.stopped || bot.generation !== generation) return;
-
-    const sock = makeWASocket({
-        version,
-        auth: {
-            creds: state.creds,
-            keys: makeCacheableSignalKeyStore(state.keys, logger)
-        },
-        logger,
-        printQRInTerminal: false,
-        browser: Browsers.macOS('Safari'),
-        syncFullHistory: false,
-        markOnlineOnConnect: false,
-        connectTimeoutMs: 60000,
-        keepAliveIntervalMs: 30000
+  if (!isValidPhoneNumber(phoneNumber)) {
+    return res.status(400).json({
+      error: 'Enter a valid phone number with country code.'
     });
+  }
 
-    bot.sock = sock;
-    bot.phoneNumber = phoneNumber;
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
+  const now = Date.now();
 
-    sock.ev.on('creds.update', async () => {
-        try {
-            await saveCreds();
-        } catch (error) {
-            console.error('Credential save error:', error.message);
-        }
-    });
+  const previous = pairingAttempts.get(ip);
 
-    if (!state.creds.registered && onCode) {
-        setTimeout(async () => {
-            try {
-                if (!state.creds.registered && !bot.stopped &&
-                    bot.generation === generation) {
-                    const code = await sock.requestPairingCode(phoneNumber);
-                    onCode(null, code);
-                }
-            } catch (error) {
-                onCode(error);
-            }
-        }, 3000);
+  if (previous && now - previous.time < 60000) {
+    if (previous.count >= MAX_PAIRING_REQUESTS_PER_IP) {
+      return res.status(429).json({
+        error: 'Too many requests. Try again in one minute.'
+      });
     }
 
-    sock.ev.on('connection.update', async update => {
-
-        if (bot.stopped || bot.generation !== generation) return;
-
-        const { connection, lastDisconnect } = update;
-
-        if (connection === 'open') {
-            console.log(`✅ Connected: ${phoneNumber}`);
-            bot.reconnecting = false;
-
-            await UserSession.updateOne(
-                { userId },
-                { $set: { isConnected: true } }
-            );
-        }
-
-        if (connection === 'close') {
-            console.log(`❌ Disconnected: ${phoneNumber}`);
-
-            await UserSession.updateOne(
-                { userId },
-                { $set: { isConnected: false } }
-            );
-
-            const statusCode =
-                lastDisconnect?.error?.output?.statusCode;
-
-            if (statusCode === DisconnectReason.loggedOut) {
-                console.log(`🚪 Logged out: ${phoneNumber}`);
-                await deleteUserSession(userId);
-                return;
-            }
-
-            if (!bot.stopped && !bot.reconnecting) {
-                bot.reconnecting = true;
-
-                bot.reconnectTimer = setTimeout(async () => {
-                    bot.reconnecting = false;
-
-                    if (bot.stopped) return;
-
-                    try {
-                        await connectBot(phoneNumber, userId, bot, null);
-                    } catch (error) {
-                        console.error('Reconnect error:', error.message);
-                        bot.reconnecting = false;
-                    }
-                }, 5000);
-            }
-        }
+    previous.count++;
+  } else {
+    pairingAttempts.set(ip, {
+      count: 1,
+      time: now
     });
+  }
 
-    sock.ev.on('messages.upsert', async update => {
-        try {
-            if (!update.messages?.length) return;
+  const userId = getUserId(phoneNumber);
 
-            for (const msg of update.messages) {
-                if (!msg.message) continue;
-                await handleMessage(sock, msg);
-            }
-        } catch (error) {
-            console.error(
-                'Command Handler Error:',
-                error.stack || error.message
-            );
-        }
+  if (pairingRequests.has(userId)) {
+    return res.status(409).json({
+      error: 'A pairing request is already in progress.'
     });
+  }
 
-    sock.ev.on('group-participants.update', async update => {
-        try {
-            await handleGroupUpdate(sock, update);
-        } catch (error) {
-            console.error('Group event error:', error.message);
-        }
+  if (activeBots.has(userId)) {
+    return res.status(409).json({
+      error: 'This WhatsApp number already has an active bot.'
     });
+  }
 
-    return sock;
-}
+  try {
+    const existingSession = await UserSession.findOne({
+      userId
+    }).lean();
 
-// ==================================================
-// 11. PAIRING ENDPOINT
-// ==================================================
-
-app.get('/pair', checkRateLimit, async (req, res) => {
-
-    const phoneNumber = normalizePhone(req.query.number);
-
-    if (!validPhone(phoneNumber)) {
-        return res.status(400).json({
-            error: 'Please provide a valid phone number.'
-        });
+    if (existingSession) {
+      return res.status(409).json({
+        error: 'This number already has a registered session.'
+      });
     }
 
-    if (mongoose.connection.readyState !== 1) {
-        return res.status(503).json({
-            error: 'Database is not connected.'
-        });
-    }
+    pairingRequests.add(userId);
 
-    if (activeNumbers.has(phoneNumber) ||
-        pairingRequests.has(phoneNumber)) {
-        return res.status(409).json({
-            error: 'This number already has an active session or pairing request.'
-        });
-    }
+    let responseSent = false;
 
-    try {
-        const existing = await UserSession.findOne({ phoneNumber });
+    const bot = await connectBot(
+      phoneNumber,
+      userId,
+      code => {
+        if (!responseSent && !res.headersSent) {
+          responseSent = true;
 
-        if (existing) {
-            const savedCreds = await AuthData.findOne({
-                userId: existing.userId,
-                key: '__creds__'
-            });
-
-            if (savedCreds) {
-                const credentials = JSON.parse(
-                    savedCreds.value,
-                    BufferJSON.reviver
-                );
-
-                if (credentials.registered) {
-                    return res.status(409).json({
-                        error: 'This number already has a saved WhatsApp session.'
-                    });
-                }
-            }
-
-            await deleteUserSession(existing.userId);
+          res.json({
+            success: true,
+            code,
+            instructions:
+              'Open WhatsApp > Linked Devices > Link with phone number.'
+          });
         }
+      }
+    );
 
-        const userId = createSessionId();
-
-        const bot = {
-            sock: null,
-            stopped: false,
-            reconnecting: false,
-            reconnectTimer: null,
-            generation: 0,
-            phoneNumber
-        };
-
-        await UserSession.create({
-            userId,
-            phoneNumber,
-            isConnected: false
-        });
-
-        activeBots.set(userId, bot);
-        activeNumbers.set(phoneNumber, userId);
-        pairingRequests.add(phoneNumber);
-
-        let responseSent = false;
-
-        const timeout = setTimeout(async () => {
-            if (responseSent) return;
-
-            responseSent = true;
-            bot.stopped = true;
-
-            activeBots.delete(userId);
-            activeNumbers.delete(phoneNumber);
-            pairingRequests.delete(phoneNumber);
-
-            try {
-                bot.sock?.end(new Error('Pairing timeout'));
-            } catch (_) {}
-
-            await deleteUserSession(userId);
-
-            if (!res.headersSent) {
-                res.status(504).json({
-                    error: 'Pairing timed out. Please try again.'
-                });
-            }
-        }, 45000);
-
-        const onCode = async (error, code) => {
-            if (responseSent) return;
-
-            responseSent = true;
-            clearTimeout(timeout);
-            pairingRequests.delete(phoneNumber);
-
-            if (error) {
-                bot.stopped = true;
-                activeBots.delete(userId);
-                activeNumbers.delete(phoneNumber);
-
-                try {
-                    bot.sock?.end(new Error('Pairing failed'));
-                } catch (_) {}
-
-                await deleteUserSession(userId);
-
-                if (!res.headersSent) {
-                    res.status(500).json({
-                        error: error.message || 'Pairing failed.'
-                    });
-                }
-                return;
-            }
-
-            if (!res.headersSent) res.json({ code });
-        };
-
-        await connectBot(phoneNumber, userId, bot, onCode);
-
-    } catch (error) {
-        console.error('Pairing error:', error.message);
-        pairingRequests.delete(phoneNumber);
-
-        if (!res.headersSent) {
-            res.status(500).json({
-                error: 'Could not start pairing. Please try again.'
-            });
+    await UserSession.updateOne(
+      { userId },
+      {
+        $setOnInsert: {
+          userId,
+          phoneNumber,
+          isConnected: false,
+          createdAt: new Date()
         }
+      },
+      { upsert: true }
+    );
+
+    // Keep the socket running while the user links the device.
+    setTimeout(async () => {
+      if (
+        !bot.connected &&
+        !bot.sock.user
+      ) {
+        console.log(`[PAIRING] Still waiting for ${phoneNumber}`);
+      }
+    }, 60000);
+
+  } catch (error) {
+    console.error('[PAIRING] Error:', error.message);
+
+    await deleteUserSession(userId).catch(() => {});
+
+    if (!res.headersSent) {
+      res.status(500).json({
+        error: 'Could not generate a pairing code. Please try again.'
+      });
     }
+  } finally {
+    pairingRequests.delete(userId);
+  }
 });
 
-// ==================================================
-// 12. RESTORE SAVED SESSIONS
-// ==================================================
+// ======================================================
+// 10. RESTORE SAVED SESSIONS
+// ======================================================
 
 async function restoreSessions() {
+  console.log('[RESTORE] Checking saved WhatsApp sessions...');
 
-    console.log('🔄 Restoring saved WhatsApp sessions...');
+  const sessions = await UserSession.find({}).lean();
 
-    const savedSessions = await UserSession.find({});
-
-    for (const session of savedSessions) {
-
-        const { userId, phoneNumber } = session;
-
-        if (activeBots.has(userId)) continue;
-
-        try {
-            const savedCreds = await AuthData.findOne({
-                userId,
-                key: '__creds__'
-            });
-
-            if (!savedCreds) {
-                await deleteUserSession(userId);
-                continue;
-            }
-
-            const credentials = JSON.parse(
-                savedCreds.value,
-                BufferJSON.reviver
-            );
-
-            if (!credentials.registered) {
-                await deleteUserSession(userId);
-                continue;
-            }
-
-            const bot = {
-                sock: null,
-                stopped: false,
-                reconnecting: false,
-                reconnectTimer: null,
-                generation: 0,
-                phoneNumber
-            };
-
-            activeBots.set(userId, bot);
-            activeNumbers.set(phoneNumber, userId);
-
-            await connectBot(phoneNumber, userId, bot, null);
-
-            console.log(`♻️ Restoring: ${phoneNumber}`);
-
-        } catch (error) {
-            console.error(
-                `Restore error ${phoneNumber}:`,
-                error.message
-            );
-
-            activeBots.delete(userId);
-            activeNumbers.delete(phoneNumber);
-        }
-    }
-
-    console.log('✅ Session restoration completed.');
-}
-
-// ==================================================
-// 13. START SERVER
-// ==================================================
-
-async function startServer() {
+  for (const session of sessions) {
     try {
-        await mongoose.connect(MONGO_URI);
+      const credentials = await AuthData.findOne({
+        userId: session.userId,
+        key: '__creds__'
+      }).lean();
 
-        console.log('✅ Connected to MongoDB Atlas');
+      if (!credentials || !credentials.value?.registered) {
+        console.log(
+          `[RESTORE] Skipping unregistered session: ${session.phoneNumber}`
+        );
 
-        await restoreSessions();
+        continue;
+      }
 
-        app.listen(PORT, '0.0.0.0', () => {
-            console.log(`🌐 LABAN-XMD running on port ${PORT}`);
-        });
+      if (activeBots.has(session.userId)) {
+        continue;
+      }
+
+      console.log(`[RESTORE] Starting ${session.phoneNumber}`);
+
+      await connectBot(
+        session.phoneNumber,
+        session.userId,
+        null
+      );
 
     } catch (error) {
-        console.error('❌ Startup error:', error.message);
-        process.exit(1);
+      console.error(
+        `[RESTORE] Failed for ${session.phoneNumber}:`,
+        error.message
+      );
     }
+  }
+
+  console.log('[RESTORE] Session restoration completed.');
 }
 
-// ==================================================
-// 14. GRACEFUL SHUTDOWN
-// ==================================================
+// ======================================================
+// 11. START SERVER
+// ======================================================
+
+async function startServer() {
+  try {
+    await mongoose.connect(MONGO_URI);
+
+    console.log('[MONGO] Connected successfully.');
+
+    await restoreSessions();
+
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`[SERVER] LABAN-XMD running on port ${PORT}`);
+    });
+
+  } catch (error) {
+    console.error('[STARTUP] Failed:', error.message);
+    process.exit(1);
+  }
+}
+
+// ======================================================
+// 12. GRACEFUL SHUTDOWN
+// ======================================================
 
 async function shutdown() {
+  console.log('[SERVER] Shutting down...');
 
-    console.log('🛑 LABAN-XMD shutting down...');
+  for (const timer of reconnectTimers.values()) {
+    clearTimeout(timer);
+  }
 
-    for (const bot of activeBots.values()) {
-        bot.stopped = true;
-
-        if (bot.reconnectTimer) {
-            clearTimeout(bot.reconnectTimer);
-        }
-
-        try {
-            bot.sock?.end(new Error('Server shutting down'));
-        } catch (_) {}
-    }
-
-    activeBots.clear();
-    activeNumbers.clear();
+  for (const bot of activeBots.values()) {
+    bot.intentionalDisconnect = true;
 
     try {
-        await mongoose.disconnect();
+      bot.sock.ev.removeAllListeners();
+      bot.sock.end(undefined);
     } catch (_) {}
+  }
 
-    process.exit(0);
+  activeBots.clear();
+  activeNumbers.clear();
+  reconnectTimers.clear();
+
+  try {
+    await mongoose.disconnect();
+  } catch (_) {}
+
+  process.exit(0);
 }
 
-process.once('SIGINT', shutdown);
-process.once('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
 
-// ==================================================
-// 15. START APPLICATION
-// ==================================================
+process.on('unhandledRejection', error => {
+  console.error('[UNHANDLED REJECTION]', error);
+});
+
+process.on('uncaughtException', error => {
+  console.error('[UNCAUGHT EXCEPTION]', error);
+  shutdown();
+});
 
 startServer();
