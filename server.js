@@ -48,7 +48,7 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 
 // PASTE YOUR NEW MONGODB CONNECTION URL HERE
-const MONGO_URL = 'PASTE_YOUR_NEW_MONGODB_URL_HERE';
+const MONGO_URL = 'mongodb+srv://labanlaby34_db_user:labanlabanlaban@whatsapp.xv0gpkv.mongodb.net/';
 
 const SESSION_DIR = path.resolve(
     process.env.SESSION_DIR || './sessions'
@@ -56,7 +56,7 @@ const SESSION_DIR = path.resolve(
 
 const logger = pino({ level: 'silent' });
 
-if (!MONGO_URL || MONGO_URL === 'PASTE_YOUR_NEW_MONGODB_URL_HERE') {
+if (!MONGO_URL || MONGO_URL === 'mongodb+srv://labanlaby34_db_user:labanlabanlaban@whatsapp.xv0gpkv.mongodb.net/') {
     throw new Error('Please add your MongoDB connection URL.');
 }
 
