@@ -2,477 +2,1295 @@
 
 const express = require('express');
 const mongoose = require('mongoose');
-const { spawn } = require('child_process');
-const path = require('path');
 const fs = require('fs');
-const crypto = require('crypto');
+const path = require('path');
+const pino = require('pino');
+const PhoneNumber = require('awesome-phonenumber');
+
+// GAAJU-XMD support files
+global.File = global.File || class File {};
+
+require('./settings');
+require('./config.js');
+
+const settings = require('./settings');
+const store = require('./lib/lightweight_store');
+
+const { smsg } = require('./lib/myfunc');
+
+const {
+    handleMessages,
+    handleGroupParticipantUpdate
+} = require('./main');
+
+const {
+    handleStatusUpdate,
+    handleBulkStatusUpdate
+} = require('./commands/autostatus');
+
+const { storeMessage } = require('./commands/antidelete');
+const { handleAnticall } = require('./commands/anticall');
+
+const {
+    default: makeWASocket,
+    useMultiFileAuthState,
+    DisconnectReason,
+    fetchLatestBaileysVersion,
+    makeCacheableSignalKeyStore,
+    Browsers,
+    jidDecode
+} = require('@whiskeysockets/baileys');
 
 const app = express();
-const PORT = Number(process.env.PORT || 3000);
 
-// PASTE YOUR NEW MONGODB ATLAS URL HERE
-const MONGO_URL = 'mongodb+srv://labanlaby34_db_user:labanlabanlaban@whatsapp.xv0gpkv.mongodb.net/?retryWrites=true&w=majority';
+app.use(express.json());
 
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
-const DATA_DIR = path.resolve(
-    process.env.DATA_DIR || path.join(__dirname, 'user_sessions')
+const PORT = process.env.PORT || 3000;
+
+// PASTE YOUR NEW MONGODB CONNECTION URL HERE
+const MONGO_URL = 'PASTE_YOUR_NEW_MONGODB_URL_HERE';
+
+const SESSION_DIR = path.resolve(
+    process.env.SESSION_DIR || './sessions'
 );
-const MAX_ACCOUNTS = Number(process.env.MAX_BOT_ACCOUNTS || 10);
 
-if (!ADMIN_TOKEN) {
-    console.error('ERROR: Set ADMIN_TOKEN in your hosting environment.');
-    process.exit(1);
+const logger = pino({ level: 'silent' });
+
+if (!MONGO_URL || MONGO_URL === 'PASTE_YOUR_NEW_MONGODB_URL_HERE') {
+    throw new Error('Please add your MongoDB connection URL.');
 }
 
-if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-}
+// GAAJU-XMD global settings
+global.packname = settings.packname;
+global.author = settings.author;
+global.botname = settings.botName || 'GAAJU-XMD';
+global.themeemoji = '🤖';
+global.channelLink = 'https://whatsapp.com/channel/0029VbBvGgyFsn0alyIDjw0z';
+global.ytch = settings.ytChannel || 'Xchristech';
 
-app.use(express.json({ limit: '20kb' }));
-app.use(express.urlencoded({ extended: false, limit: '20kb' }));
-
-const BotSchema = new mongoose.Schema({
-    phone: { type: String, required: true, unique: true, index: true },
-    sessionDir: { type: String, required: true },
-    status: { type: String, default: 'stopped' },
-    pairingCode: { type: String, default: '' },
-    lastError: { type: String, default: '' },
-    updatedAt: { type: Date, default: Date.now }
-}, { versionKey: false });
-
-const Bot = mongoose.models.GaajuBot ||
-    mongoose.model('GaajuBot', BotSchema);
-
-const children = new Map();
-const states = new Map();
-
-function cleanPhone(value) {
-    return String(value || '').replace(/\D/g, '');
-}
-
-function accountPaths(phone) {
-    const sessionDir = path.join(DATA_DIR, phone);
-
-    return {
-        sessionDir,
-        backupDir: path.join(DATA_DIR, phone + '_backup')
-    };
-}
-
-function updateState(phone, patch) {
-    const old = states.get(phone) || {
-        phone,
-        status: 'starting',
-        pairingCode: '',
-        lastError: ''
-    };
-
-    const next = {
-        ...old,
-        ...patch,
-        updatedAt: new Date().toISOString()
-    };
-
-    states.set(phone, next);
-
-    Bot.updateOne(
-        { phone },
-        { $set: { ...patch, updatedAt: new Date() } },
-        { upsert: true }
-    ).catch(err => {
-        console.error('Mongo update failed:', err.message);
-    });
-
-    return next;
-}
-
-function startBot(phone) {
-    if (children.has(phone)) {
-        return children.get(phone);
+// MongoDB session model
+const SessionSchema = new mongoose.Schema({
+    userId: {
+        type: String,
+        unique: true,
+        required: true
+    },
+    phoneNumber: String,
+    isConnected: {
+        type: Boolean,
+        default: false
     }
+}, {
+    timestamps: true
+});
 
-    const { sessionDir, backupDir } = accountPaths(phone);
+const UserSession =
+    mongoose.models.UserSession ||
+    mongoose.model('UserSession', SessionSchema);
 
-    fs.mkdirSync(sessionDir, { recursive: true });
+// Active WhatsApp connections
+const activeBots = new Map();
 
-    const child = spawn(
-        process.execPath,
-        ['--expose-gc', path.join(__dirname, 'index.js')],
-        {
-            cwd: __dirname,
-            env: {
-                ...process.env,
-                BOT_PHONE_NUMBER: phone,
-                BOT_SESSION_DIR: sessionDir,
-                BOT_SESSION_BACKUP_DIR: backupDir
-            },
-            stdio: ['ignore', 'pipe', 'pipe']
-        }
-    );
-
-    children.set(phone, child);
-
-    updateState(phone, {
-        status: 'starting',
-        pairingCode: '',
-        lastError: ''
-    });
-
-    const consume = chunk => {
-        const output = chunk.toString();
-
-        for (const line of output.split(/\r?\n/)) {
-            if (!line) continue;
-
-            console.log(`[${phone}] ${line}`);
-
-            const match = line.match(/PAIRING_CODE:([A-Z0-9-]+)/i);
-
-            if (match) {
-                updateState(phone, {
-                    status: 'pairing',
-                    pairingCode: match[1],
-                    lastError: ''
-                });
-            }
-
-            if (/Connected =>|Bot Connected!/i.test(line)) {
-                updateState(phone, {
-                    status: 'connected',
-                    pairingCode: ''
-                });
-            }
-
-            if (/Invalid number|Fatal error/i.test(line)) {
-                updateState(phone, {
-                    status: 'error',
-                    lastError: line.slice(0, 500)
-                });
-            }
-        }
-    };
-
-    child.stdout.on('data', consume);
-    child.stderr.on('data', consume);
-
-    child.on('error', err => {
-        updateState(phone, {
-            status: 'error',
-            lastError: err.message
-        });
-
-        children.delete(phone);
-    });
-
-    child.on('exit', (code, signal) => {
-        children.delete(phone);
-
-        const current = states.get(phone) || {};
-
-        if (current.status !== 'logged_out') {
-            updateState(phone, {
-                status: code === 0 ? 'stopped' : 'error',
-                lastError: code === 0
-                    ? ''
-                    : `Bot process ended (code ${code}, signal ${signal || 'none'}).`
-            });
-        }
-    });
-
-    return child;
-}
-
-function requireAdmin(req, res, next) {
-    const supplied = String(
-        req.get('x-admin-token') ||
-        req.body?.token ||
-        req.query?.token ||
-        ''
-    );
-
-    const a = Buffer.from(supplied);
-    const b = Buffer.from(ADMIN_TOKEN);
-
-    if (
-        a.length !== b.length ||
-        !crypto.timingSafeEqual(a, b)
-    ) {
-        return res.status(401).json({
-            success: false,
-            error: 'Unauthorized. Check your admin token.'
-        });
-    }
-
-    next();
-}
-
-// PAIRING WEBSITE
-app.get('/', (_req, res) => {
-    res.type('html').send(`<!doctype html>
-<html>
+// Pairing website
+const htmlPage = `<!DOCTYPE html>
+<html lang="en">
 <head>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>GAAJU-XMD Pairing</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WhatsApp Multi-Bot Pairing</title>
+
 <style>
-body {
-    font-family: Arial,sans-serif;
-    max-width: 520px;
-    margin: 40px auto;
-    padding: 18px;
-    background: #f4f6f8;
-    color: #17202a;
-}
-main {
-    background: white;
-    padding: 22px;
-    border-radius: 14px;
-    box-shadow: 0 3px 18px #0001;
-}
-input,button {
+* {
     box-sizing: border-box;
+}
+
+body {
+    font-family: Segoe UI, sans-serif;
+    background: #121212;
+    color: #fff;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    margin: 0;
+    padding: 15px;
+}
+
+.container {
+    background: #1e1e1e;
+    padding: 35px;
+    border-radius: 12px;
+    text-align: center;
+    max-width: 400px;
+    width: 100%;
+    box-shadow: 0 4px 15px rgba(0,0,0,.5);
+}
+
+h1 {
+    color: #25D366;
+}
+
+p {
+    color: #aaa;
+}
+
+input {
     width: 100%;
     padding: 13px;
-    margin: 8px 0;
-    border: 1px solid #ccd3da;
-    border-radius: 8px;
+    margin: 15px 0;
+    border: 1px solid #333;
+    background: #2a2a2a;
+    color: white;
+    border-radius: 6px;
     font-size: 16px;
 }
+
 button {
-    background: #125bd2;
-    color: white;
+    width: 100%;
+    padding: 13px;
+    background: #25D366;
+    color: black;
     border: 0;
+    border-radius: 6px;
     font-weight: bold;
+    cursor: pointer;
 }
-pre {
-    white-space: pre-wrap;
-    background: #eef2f7;
-    padding: 12px;
-    border-radius: 8px;
-    min-height: 55px;
+
+button:disabled {
+    opacity: .6;
+}
+
+.code-box {
+    margin-top: 20px;
+    padding: 15px;
+    background: #2a2a2a;
+    border: 1px dashed #25D366;
+    border-radius: 6px;
+    display: none;
+}
+
+.code-box h2 {
+    color: #25D366;
+    font-size: 28px;
+    letter-spacing: 3px;
 }
 </style>
 </head>
+
 <body>
-<main>
-<h2>🤖 GAAJU-XMD Pairing</h2>
-<p>Enter your admin token and WhatsApp number with country code.</p>
 
-<input id="token" type="password" placeholder="Admin token">
-<input id="phone" inputmode="numeric" placeholder="Example: 2547XXXXXXXX">
+<div class="container">
 
-<button onclick="pair()">Get pairing code</button>
+<h1>Link Your WhatsApp</h1>
 
-<pre id="result">Waiting...</pre>
-</main>
+<p>Enter number with country code (no +)</p>
+
+<input
+    type="text"
+    id="number"
+    placeholder="e.g. 254712345678"
+>
+
+<button id="pairBtn" onclick="pair()">
+    Get Pairing Code
+</button>
+
+<div class="code-box" id="result">
+
+<p>Your Pairing Code:</p>
+
+<h2 id="code"></h2>
+
+<p style="font-size:12px">
+WhatsApp &gt; Linked Devices &gt; Link with phone number
+</p>
+
+</div>
+</div>
 
 <script>
 async function pair() {
-    const result = document.getElementById('result');
-    const token = document.getElementById('token').value;
-    const phone = document.getElementById('phone').value;
 
-    result.textContent = 'Starting bot...';
+    const num = document.getElementById('number').value.trim();
+
+    const button = document.getElementById('pairBtn');
+
+    const result = document.getElementById('result');
+
+    const code = document.getElementById('code');
+
+    if (!/^\\d{8,15}$/.test(num)) {
+        return alert('Enter a valid phone number.');
+    }
+
+    button.disabled = true;
+
+    button.innerText = 'Please wait...';
+
+    result.style.display = 'block';
+
+    code.innerText = 'Generating...';
 
     try {
-        const r = await fetch('/api/pair', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'x-admin-token': token
-            },
-            body: JSON.stringify({ phone })
-        });
 
-        const d = await r.json();
+        const response = await fetch(
+            '/pair?number=' + encodeURIComponent(num)
+        );
 
-        if (!r.ok) {
-            throw Error(d.error || 'Request failed');
+        const data = await response.json();
+
+        if (!response.ok || data.error) {
+
+            code.innerText = '';
+
+            alert(data.error || 'Pairing failed.');
+
+        } else {
+
+            code.innerText = data.code;
+
         }
 
-        result.textContent = 'Bot started. Waiting for pairing code...';
+    } catch (error) {
 
-        let tries = 0;
+        alert('Connection error. Please try again.');
 
-        const timer = setInterval(async () => {
-            try {
-                const s = await fetch(
-                    '/api/status/' + encodeURIComponent(d.phone),
-                    {
-                        headers: { 'x-admin-token': token }
-                    }
-                );
+    } finally {
 
-                const v = await s.json();
+        button.disabled = false;
 
-                result.textContent = v.pairingCode
-                    ? 'PAIRING CODE: ' + v.pairingCode
-                    : 'Status: ' + v.status +
-                      (v.lastError ? '\\n' + v.lastError : '');
+        button.innerText = 'Get Pairing Code';
 
-                if (
-                    v.pairingCode ||
-                    v.status === 'connected' ||
-                    v.status === 'error' ||
-                    ++tries > 30
-                ) {
-                    clearInterval(timer);
-                }
-            } catch (e) {
-                clearInterval(timer);
-                result.textContent = e.message;
-            }
-        }, 2000);
-
-    } catch (e) {
-        result.textContent = e.message;
     }
 }
 </script>
+
 </body>
-</html>`);
+</html>`;
+
+app.get('/', (_req, res) => {
+    res.send(htmlPage);
 });
 
-// HEALTH CHECK
-app.get('/health', (_req, res) => {
-    res.json({
-        status: 'healthy',
-        bot: 'GAAJU-XMD',
-        uptime: process.uptime()
-    });
+app.get('/ping', (_req, res) => {
+    res.send('alive');
 });
 
-// START PAIRING
-app.post('/api/pair', requireAdmin, async (req, res) => {
-    const phone = cleanPhone(req.body.phone);
-
-    if (phone.length < 8 || phone.length > 15) {
-        return res.status(400).json({
-            success: false,
-            error: 'Enter a valid phone number with country code.'
-        });
-    }
+// Read autostatus settings
+function readStatusConfig() {
 
     try {
-        const count = await Bot.countDocuments();
 
-        if (!children.has(phone) && count >= MAX_ACCOUNTS) {
-            return res.status(429).json({
-                success: false,
-                error: `Account limit reached (${MAX_ACCOUNTS}).`
-            });
-        }
-
-        const existing = children.get(phone);
-
-        if (existing) {
-            return res.json({
-                success: true,
-                phone,
-                message: 'This number already has a running bot.'
-            });
-        }
-
-        await Bot.updateOne(
-            { phone },
-            {
-                $set: {
-                    phone,
-                    sessionDir: accountPaths(phone).sessionDir,
-                    status: 'starting',
-                    pairingCode: '',
-                    lastError: '',
-                    updatedAt: new Date()
-                }
-            },
-            { upsert: true }
+        const file = path.join(
+            __dirname,
+            'data',
+            'autostatus.json'
         );
 
-        startBot(phone);
+        if (fs.existsSync(file)) {
 
-        res.json({
-            success: true,
-            phone,
-            message: 'Bot started. Poll /api/status for the pairing code.'
-        });
+            const data = JSON.parse(
+                fs.readFileSync(file, 'utf8')
+            );
 
-    } catch (err) {
-        console.error(err);
+            return {
+                enabled: data.enabled === true,
+                likeOn: data.likeOn === true,
+                selfOn: data.selfOn === true
+            };
+        }
 
-        res.status(500).json({
-            success: false,
-            error: 'Could not start bot.'
-        });
-    }
-});
+    } catch (error) {
 
-// CHECK STATUS
-app.get('/api/status/:phone', requireAdmin, async (req, res) => {
-    const phone = cleanPhone(req.params.phone);
-    const live = states.get(phone);
+        console.error(
+            'Status config read error:',
+            error.message
+        );
 
-    if (live) {
-        return res.json(live);
     }
 
-    const saved = await Bot.findOne({ phone }).lean().catch(() => null);
+    return {
+        enabled: false,
+        likeOn: false,
+        selfOn: false
+    };
+}
 
-    if (!saved) {
-        return res.status(404).json({
-            success: false,
-            error: 'Account not found.'
-        });
+// Socket helper functions
+function attachSocketHelpers(sock) {
+
+    sock.decodeJid = (jid) => {
+
+        if (!jid) return jid;
+
+        if (/:[0-9]+@/i.test(jid)) {
+
+            const decoded = jidDecode(jid) || {};
+
+            return decoded.user && decoded.server
+                ? `${decoded.user}@${decoded.server}`
+                : jid;
+        }
+
+        return jid;
+    };
+
+    sock.getName = (jid, withoutContact = false) => {
+
+        const id = sock.decodeJid(jid);
+
+        const contact = store.contacts?.[id] || {};
+
+        if (id?.endsWith('@g.us')) {
+
+            const group = store.chats?.[id] || {};
+
+            return group.subject || contact.name || id;
+        }
+
+        if (id === '0@s.whatsapp.net') {
+            return 'WhatsApp';
+        }
+
+        if (id === sock.decodeJid(sock.user?.id)) {
+
+            return sock.user?.name ||
+                sock.user?.verifiedName ||
+                id;
+        }
+
+        if (!withoutContact &&
+            (contact.name || contact.notify || contact.verifiedName)) {
+
+            return contact.name ||
+                contact.notify ||
+                contact.verifiedName;
+        }
+
+        const number = String(id || '')
+            .split('@')[0]
+            .split(':')[0];
+
+        try {
+
+            return new PhoneNumber(`+${number}`)
+                .getNumber('international') || number;
+
+        } catch (_) {
+
+            return number;
+
+        }
+    };
+
+    sock.serializeM = (message) => {
+        return smsg(sock, message, store);
+    };
+
+    sock.public = true;
+}
+
+// Attach original GAAJU-XMD command handlers
+function bindBotEvents(sock, bot) {
+
+    try {
+
+        store.bind(sock.ev);
+
+    } catch (error) {
+
+        console.error('Store bind warning:', error.message);
+
     }
 
-    res.json({
-        phone,
-        status: saved.status,
-        pairingCode: saved.pairingCode,
-        lastError: saved.lastError
+    sock.ev.on('contacts.update', updates => {
+
+        for (const contact of updates || []) {
+
+            const id = sock.decodeJid(contact.id);
+
+            if (id && store.contacts) {
+
+                store.contacts[id] = {
+                    id,
+                    name: contact.notify || contact.name
+                };
+
+            }
+        }
     });
-});
 
-// STOP BOT
-app.post('/api/stop/:phone', requireAdmin, async (req, res) => {
-    const phone = cleanPhone(req.params.phone);
-    const child = children.get(phone);
+    sock.ev.on('messages.upsert', async update => {
 
-    if (!child) {
-        return res.status(404).json({
-            success: false,
-            error: 'Bot is not running.'
-        });
-    }
+        try {
 
-    updateState(phone, {
-        status: 'stopping',
-        pairingCode: ''
+            if (!update?.messages?.length) return;
+
+            for (const message of update.messages) {
+
+                if (!message?.message) continue;
+
+                const jid = message.key?.remoteJid;
+
+                if (jid === 'status@broadcast') {
+
+                    if (!message.key.fromMe) {
+
+                        try {
+                            storeMessage(sock, message);
+                        } catch (_) {}
+
+                        const statusConfig = readStatusConfig();
+
+                        if (statusConfig.enabled) {
+
+                            handleStatusUpdate(
+                                sock,
+                                {
+                                    messages: [message],
+                                    type: update.type
+                                }
+                            ).catch(() => {});
+
+                        }
+                    }
+
+                    continue;
+                }
+            }
+
+            // Original command pipeline
+            await handleMessages(sock, update, true);
+
+            if (update.messages.length > 1) {
+
+                const statusMessages = update.messages.filter(
+                    m =>
+                        m?.key?.remoteJid === 'status@broadcast' &&
+                        !m.key.fromMe &&
+                        m.key.participant
+                );
+
+                if (statusMessages.length) {
+
+                    const statusConfig = readStatusConfig();
+
+                    if (statusConfig.enabled) {
+
+                        handleBulkStatusUpdate(
+                            sock,
+                            statusMessages
+                        ).catch(() => {});
+
+                    }
+                }
+            }
+
+        } catch (error) {
+
+            console.error(
+                `[${bot.phoneNumber}] MESSAGE HANDLER ERROR:`,
+                error.stack || error.message
+            );
+
+        }
     });
 
-    child.kill('SIGTERM');
+    sock.ev.on('group-participants.update', async update => {
 
-    res.json({
-        success: true,
-        phone,
-        status: 'stopping'
+        try {
+
+            await handleGroupParticipantUpdate(sock, update);
+
+        } catch (error) {
+
+            console.error(
+                `[${bot.phoneNumber}] GROUP EVENT ERROR:`,
+                error.message
+            );
+
+        }
     });
-});
 
-// START SERVER
-async function main() {
-    if (!MONGO_URI || MONGO_URI.includes('PASTE_YOUR_NEW')) {
-        throw new Error('Add your new MongoDB Atlas URL to MONGO_URI in server.js.');
-    }
+    sock.ev.on('call', async calls => {
 
-    await mongoose.connect(MONGO_URI);
+        try {
 
-    console.log('MongoDB connected.');
+            await handleAnticall(sock, calls);
 
-    app.listen(PORT, () => {
-        console.log(`GAAJU-XMD pairing server listening on port ${PORT}`);
+        } catch (error) {
+
+            console.error(
+                `[${bot.phoneNumber}] CALL HANDLER ERROR:`,
+                error.message
+            );
+
+        }
     });
 }
 
-main().catch(err => {
-    console.error('Server startup failed:', err.message);
-    process.exit(1);
+// Connect WhatsApp socket
+async function connectSocket(bot, onPairingCode = null) {
+
+    if (bot.stopped) return;
+
+    const {
+        state,
+        saveCreds
+    } = await useMultiFileAuthState(bot.sessionPath);
+
+    const { version } = await fetchLatestBaileysVersion();
+
+    if (bot.stopped) return;
+
+    const sock = makeWASocket({
+
+        version,
+
+        auth: {
+            creds: state.creds,
+            keys: makeCacheableSignalKeyStore(
+                state.keys,
+                logger
+            )
+        },
+
+        logger,
+
+        printQRInTerminal: false,
+
+        browser: Browsers.macOS('Safari'),
+
+        syncFullHistory: false,
+
+        markOnlineOnConnect: false,
+
+        connectTimeoutMs: 60000,
+
+        keepAliveIntervalMs: 30000,
+
+        defaultQueryTimeoutMs: 60000,
+
+        getMessage: async key => {
+
+            try {
+
+                const saved = await store.loadMessage(
+                    key.remoteJid,
+                    key.id
+                );
+
+                return saved?.message || undefined;
+
+            } catch (_) {
+
+                return undefined;
+
+            }
+        }
+    });
+
+    bot.sock = sock;
+
+    bot.reconnecting = false;
+
+    bot.connectionClosed = false;
+
+    attachSocketHelpers(sock);
+
+    sock.ev.on('creds.update', saveCreds);
+
+    bindBotEvents(sock, bot);
+
+    if (!state.creds.registered && onPairingCode) {
+
+        bot.pairingTimer = setTimeout(async () => {
+
+            try {
+
+                if (
+                    bot.stopped ||
+                    bot.pairingRequested ||
+                    state.creds.registered
+                ) return;
+
+                bot.pairingRequested = true;
+
+                console.log(
+                    `Requesting pairing code: ${bot.phoneNumber}`
+                );
+
+                const code = await sock.requestPairingCode(
+                    bot.phoneNumber
+                );
+
+                console.log(
+                    `Pairing code generated: ${bot.phoneNumber}`
+                );
+
+                onPairingCode(null, code);
+
+            } catch (error) {
+
+                console.error(
+                    'PAIRING ERROR:',
+                    error.stack || error.message
+                );
+
+                onPairingCode(error);
+
+            }
+
+        }, 3000);
+    }
+
+    sock.ev.on('connection.update', async update => {
+
+        const {
+            connection,
+            lastDisconnect
+        } = update;
+
+        if (connection === 'connecting') {
+
+            console.log(
+                `Connecting: ${bot.phoneNumber}`
+            );
+
+        }
+
+        if (connection === 'open') {
+
+            console.log(
+                `WhatsApp connected: ${bot.phoneNumber}`
+            );
+
+            bot.reconnecting = false;
+
+            try {
+
+                await UserSession.findOneAndUpdate(
+
+                    { userId: bot.userId },
+
+                    {
+                        phoneNumber: bot.phoneNumber,
+                        isConnected: true
+                    },
+
+                    {
+                        upsert: true,
+                        new: true
+                    }
+
+                );
+
+            } catch (error) {
+
+                console.error(
+                    'DATABASE CONNECTED UPDATE ERROR:',
+                    error.message
+                );
+
+            }
+
+            try {
+
+                const groups =
+                    await sock.groupFetchAllParticipating();
+
+                for (const group of Object.values(groups || {})) {
+
+                    if (store.chats) {
+
+                        store.chats[group.id] = {
+                            id: group.id,
+                            ...group
+                        };
+
+                    }
+                }
+
+            } catch (error) {
+
+                console.error(
+                    `[${bot.phoneNumber}] GROUP CACHE ERROR:`,
+                    error.message
+                );
+
+            }
+        }
+
+        if (connection === 'close') {
+
+            if (bot.connectionClosed) return;
+
+            bot.connectionClosed = true;
+
+            const statusCode =
+                lastDisconnect?.error?.output?.statusCode;
+
+            const errorMessage =
+                lastDisconnect?.error?.message || 'Unknown error';
+
+            console.log(
+                `Connection closed: ${bot.phoneNumber} | ${statusCode || 'no status'} | ${errorMessage}`
+            );
+
+            try {
+
+                await UserSession.findOneAndUpdate(
+
+                    { userId: bot.userId },
+
+                    { isConnected: false }
+
+                );
+
+            } catch (error) {
+
+                console.error(
+                    'DATABASE DISCONNECT UPDATE ERROR:',
+                    error.message
+                );
+
+            }
+
+            // Remove credentials only after a real logout
+            if (statusCode === DisconnectReason.loggedOut) {
+
+                console.log(
+                    `User logged out: ${bot.phoneNumber}`
+                );
+
+                bot.stopped = true;
+
+                if (bot.pairingTimer) {
+                    clearTimeout(bot.pairingTimer);
+                }
+
+                if (bot.reconnectTimer) {
+                    clearTimeout(bot.reconnectTimer);
+                }
+
+                if (activeBots.get(bot.userId) === bot) {
+
+                    activeBots.delete(bot.userId);
+
+                }
+
+                try {
+
+                    await fs.promises.rm(
+                        bot.sessionPath,
+                        {
+                            recursive: true,
+                            force: true
+                        }
+                    );
+
+                } catch (error) {
+
+                    console.error(
+                        'SESSION CLEANUP ERROR:',
+                        error.message
+                    );
+
+                }
+
+                if (onPairingCode) {
+
+                    onPairingCode(
+                        new Error(
+                            'WhatsApp session expired. Request a new pairing code.'
+                        )
+                    );
+
+                }
+
+                return;
+            }
+
+            if (!bot.stopped) {
+
+                scheduleReconnect(bot);
+
+            }
+        }
+    });
+}
+
+// Automatic reconnection
+function scheduleReconnect(bot) {
+
+    if (
+        bot.stopped ||
+        bot.reconnecting ||
+        bot.reconnectTimer
+    ) return;
+
+    bot.reconnecting = true;
+
+    console.log(
+        `Reconnecting: ${bot.phoneNumber}`
+    );
+
+    bot.reconnectTimer = setTimeout(async () => {
+
+        bot.reconnectTimer = null;
+
+        if (bot.stopped) {
+
+            bot.reconnecting = false;
+
+            return;
+
+        }
+
+        try {
+
+            await connectSocket(bot, null);
+
+        } catch (error) {
+
+            console.error(
+                `[${bot.phoneNumber}] RECONNECTION ERROR:`,
+                error.stack || error.message
+            );
+
+            bot.reconnecting = false;
+
+            scheduleReconnect(bot);
+
+        }
+
+    }, 5000);
+}
+
+// Start a WhatsApp bot for one number
+async function startBot(
+    phoneNumber,
+    userId,
+    onPairingCode = null
+) {
+
+    if (activeBots.has(userId)) {
+
+        throw new Error(
+            'This number already has an active connection.'
+        );
+
+    }
+
+    const sessionPath = path.join(
+        SESSION_DIR,
+        userId
+    );
+
+    await fs.promises.mkdir(
+        sessionPath,
+        { recursive: true }
+    );
+
+    const bot = {
+
+        userId,
+
+        phoneNumber,
+
+        sessionPath,
+
+        sock: null,
+
+        stopped: false,
+
+        reconnecting: false,
+
+        reconnectTimer: null,
+
+        pairingTimer: null,
+
+        pairingRequested: false,
+
+        connectionClosed: false
+
+    };
+
+    activeBots.set(userId, bot);
+
+    try {
+
+        await connectSocket(
+            bot,
+            onPairingCode
+        );
+
+        return bot;
+
+    } catch (error) {
+
+        bot.stopped = true;
+
+        if (activeBots.get(userId) === bot) {
+
+            activeBots.delete(userId);
+
+        }
+
+        throw error;
+
+    }
+}
+
+// Pairing endpoint
+app.get('/pair', async (req, res) => {
+
+    let phoneNumber = String(
+        req.query.number || ''
+    ).replace(/[^0-9]/g, '');
+
+    if (!/^[0-9]{8,15}$/.test(phoneNumber)) {
+
+        return res.status(400).json({
+            error: 'Please enter a valid phone number with country code.'
+        });
+
+    }
+
+    const userId = `user_${phoneNumber}`;
+
+    const sessionPath = path.join(
+        SESSION_DIR,
+        userId
+    );
+
+    try {
+
+        if (mongoose.connection.readyState !== 1) {
+
+            return res.status(503).json({
+                error: 'MongoDB is not ready.'
+            });
+
+        }
+
+        if (activeBots.has(userId)) {
+
+            return res.status(409).json({
+                error: 'This number already has an active bot.'
+            });
+
+        }
+
+        if (fs.existsSync(sessionPath)) {
+
+            const { state } =
+                await useMultiFileAuthState(sessionPath);
+
+            if (state.creds.registered) {
+
+                return res.status(409).json({
+                    error: 'An existing WhatsApp session was found. Unlink the old device and wait for WhatsApp logout detection, or remove that session folder before pairing again.'
+                });
+
+            }
+        }
+
+        let responseSent = false;
+
+        let bot;
+
+        const timeout = setTimeout(() => {
+
+            if (responseSent) return;
+
+            responseSent = true;
+
+            if (bot) {
+
+                bot.stopped = true;
+
+                if (bot.pairingTimer) {
+
+                    clearTimeout(bot.pairingTimer);
+
+                }
+
+                if (bot.sock) {
+
+                    try {
+
+                        bot.sock.end(
+                            new Error('Pairing timed out')
+                        );
+
+                    } catch (_) {}
+
+                }
+
+                if (activeBots.get(userId) === bot) {
+
+                    activeBots.delete(userId);
+
+                }
+            }
+
+            if (!res.headersSent) {
+
+                res.status(504).json({
+                    error: 'Pairing timed out. Check the server logs and try again.'
+                });
+
+            }
+
+        }, 45000);
+
+        const pairingCallback = (error, code) => {
+
+            if (responseSent) return;
+
+            responseSent = true;
+
+            clearTimeout(timeout);
+
+            if (error) {
+
+                return res.status(500).json({
+                    error: error.message
+                });
+
+            }
+
+            return res.json({
+                code
+            });
+
+        };
+
+        bot = await startBot(
+            phoneNumber,
+            userId,
+            pairingCallback
+        );
+
+    } catch (error) {
+
+        console.error(
+            'PAIR ENDPOINT ERROR:',
+            error.stack || error.message
+        );
+
+        if (!res.headersSent) {
+
+            return res.status(500).json({
+                error: error.message
+            });
+
+        }
+    }
 });
+
+// Restore saved WhatsApp sessions
+async function restoreSessions() {
+
+    console.log('Checking saved sessions...');
+
+    await fs.promises.mkdir(
+        SESSION_DIR,
+        { recursive: true }
+    );
+
+    const folders = await fs.promises.readdir(
+        SESSION_DIR,
+        { withFileTypes: true }
+    );
+
+    for (const folder of folders) {
+
+        if (
+            !folder.isDirectory() ||
+            !folder.name.startsWith('user_')
+        ) continue;
+
+        const phoneNumber = folder.name.slice(5);
+
+        if (!/^[0-9]{8,15}$/.test(phoneNumber)) {
+            continue;
+        }
+
+        try {
+
+            const userId = folder.name;
+
+            const sessionPath = path.join(
+                SESSION_DIR,
+                userId
+            );
+
+            const { state } =
+                await useMultiFileAuthState(sessionPath);
+
+            if (!state.creds.registered) continue;
+
+            console.log(
+                `Restoring: ${phoneNumber}`
+            );
+
+            await startBot(
+                phoneNumber,
+                userId,
+                null
+            );
+
+        } catch (error) {
+
+            console.error(
+                `RESTORE ERROR (${phoneNumber}):`,
+                error.stack || error.message
+            );
+
+        }
+
+        await new Promise(resolve => {
+            setTimeout(resolve, 2000);
+        });
+
+    }
+}
+
+// Start Express and MongoDB
+async function startServer() {
+
+    try {
+
+        await mongoose.connect(MONGO_URL, {
+            serverSelectionTimeoutMS: 15000
+        });
+
+        console.log('Connected to MongoDB');
+
+        await fs.promises.mkdir(
+            SESSION_DIR,
+            { recursive: true }
+        );
+
+        const server = app.listen(
+            PORT,
+            '0.0.0.0',
+            () => {
+
+                console.log(
+                    `GAAJU-XMD server running on port ${PORT}`
+                );
+
+                restoreSessions().catch(error => {
+
+                    console.error(
+                        'RESTORE ERROR:',
+                        error.stack || error.message
+                    );
+
+                });
+
+            }
+        );
+
+        server.on('error', error => {
+
+            console.error(
+                'SERVER ERROR:',
+                error
+            );
+
+        });
+
+    } catch (error) {
+
+        console.error(
+            'SERVER START ERROR:',
+            error.stack || error.message
+        );
+
+        process.exit(1);
+
+    }
+}
+
+// Graceful shutdown
+async function shutdown() {
+
+    console.log(
+        'Shutting down all WhatsApp sessions...'
+    );
+
+    for (const bot of activeBots.values()) {
+
+        bot.stopped = true;
+
+        if (bot.reconnectTimer) {
+
+            clearTimeout(bot.reconnectTimer);
+
+        }
+
+        if (bot.pairingTimer) {
+
+            clearTimeout(bot.pairingTimer);
+
+        }
+
+        try {
+
+            bot.sock?.end(
+                new Error('Server shutting down')
+            );
+
+        } catch (_) {}
+
+    }
+
+    try {
+
+        require('./commands/autorecord')
+            .stopAllInfiniteRecordings();
+
+    } catch (_) {}
+
+    try {
+
+        require('./commands/autotyping')
+            .stopAllInfiniteTyping();
+
+    } catch (_) {}
+
+    try {
+
+        await mongoose.disconnect();
+
+    } catch (_) {}
+
+    process.exit(0);
+}
+
+process.once('SIGINT', shutdown);
+process.once('SIGTERM', shutdown);
+
+process.on('unhandledRejection', reason => {
+
+    console.error(
+        'UNHANDLED REJECTION:',
+        reason
+    );
+
+});
+
+process.on('uncaughtException', error => {
+
+    console.error(
+        'UNCAUGHT EXCEPTION:',
+        error
+    );
+
+});
+
+startServer();
