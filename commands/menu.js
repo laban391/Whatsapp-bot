@@ -1,5 +1,5 @@
 /**
- * GAAJU-XMD - MENU COMMAND (FINAL)
+ * LABAN-XMD - MENU COMMAND (FINAL)
  * - `.menu` : numbered picker (❶–⓯), reply-to-quote opens category sub-menu
  * - `.fullmenu` : full command list
  * - All 7 styles, user's current font
@@ -52,17 +52,23 @@ function titleCase(name) {
 
 // ---- READ TOTAL COMMANDS FROM help.js ----
 let cachedHelpCommandsRaw = null;
+
 function loadHelpCommandsRaw() {
     if (cachedHelpCommandsRaw) return cachedHelpCommandsRaw;
+
     try {
         const helpPath = path.join(__dirname, 'help.js');
         if (!fs.existsSync(helpPath)) return null;
+
         const src = fs.readFileSync(helpPath, 'utf8');
         const match = src.match(/const\s+allCommandsRaw\s*=\s*\{([\s\S]*?)\n\};/);
+
         if (!match) return null;
+
         const vm = require('vm');
         const objLiteral = '({' + match[1] + '\n})';
         const parsed = vm.runInNewContext(objLiteral, {});
+
         cachedHelpCommandsRaw = parsed;
         return parsed;
     } catch (e) {
@@ -73,15 +79,19 @@ function loadHelpCommandsRaw() {
 function countTotalCommandsFromHelp() {
     const raw = loadHelpCommandsRaw();
     if (!raw) return 0;
+
     let count = 0;
+
     for (const cmds of Object.values(raw)) {
         if (!Array.isArray(cmds)) continue;
+
         if (cmds.length > 0 && typeof cmds[0] === 'object' && cmds[0].sub) {
             for (const sub of cmds) count += (sub.cmds?.length || 0);
         } else {
             count += cmds.length;
         }
     }
+
     return count;
 }
 
@@ -97,6 +107,7 @@ function getDeploymentPlatform() {
     if (process.env.VERCEL) return 'Vercel';
     if (process.env.HEROKU_APP_NAME) return 'Heroku';
     if (process.env.RAILWAY_ENVIRONMENT) return 'Railway';
+
     return 'Local Machine';
 }
 
@@ -104,18 +115,36 @@ async function getUserStats() {
     try {
         const res = await fetch('https://gemini-proxy-5t1s.onrender.com/v1/stats');
         const data = await res.json();
-        return { totalUsers: data.totalUsers || 0, activeUsers: data.activeUsers || 0 };
-    } catch (e) { return { totalUsers: 0, activeUsers: 0 }; }
+
+        return {
+            totalUsers: data.totalUsers || 0,
+            activeUsers: data.activeUsers || 0
+        };
+    } catch (e) {
+        return { totalUsers: 0, activeUsers: 0 };
+    }
 }
 
-function getPrefix() { return settings.prefix || '.'; }
+function getPrefix() {
+    return settings.prefix || '.';
+}
 
 function getBotMode() {
     try {
         const p = path.join(__dirname, '../data/messageCount.json');
-        if (fs.existsSync(p)) { const d = JSON.parse(fs.readFileSync(p, 'utf8')); if (typeof d.isPublic === 'boolean') return d.isPublic ? 'Public' : 'Private'; }
+
+        if (fs.existsSync(p)) {
+            const d = JSON.parse(fs.readFileSync(p, 'utf8'));
+
+            if (typeof d.isPublic === 'boolean') {
+                return d.isPublic ? 'Public' : 'Private';
+            }
+        }
+
         return 'Public';
-    } catch (e) { return 'Public'; }
+    } catch (e) {
+        return 'Public';
+    }
 }
 
 async function getBotPlan() {
@@ -123,69 +152,190 @@ async function getBotPlan() {
         const ownerNumber = settings.ownerNumber || '';
         const res = await fetch(`https://gemini-proxy-5t1s.onrender.com/v1/premium/check/${ownerNumber}`);
         const data = await res.json();
+
         if (data.premium && data.remainingDays > 0) return 'Premium';
+
         return 'Free';
-    } catch (e) { return 'Free'; }
+    } catch (e) {
+        return 'Free';
+    }
 }
 
 function getTimeBasedGreeting() {
     try {
         const now = new Date();
         const tz = settings.timezone || 'Africa/Lagos';
-        const hour = parseInt(now.toLocaleString('en-US', { timeZone: tz, hour12: false, hour: '2-digit' }));
-        const time = now.toLocaleString('en-US', { timeZone: tz, hour12: true, hour: '2-digit', minute: '2-digit', second: '2-digit' });
-        if (hour >= 5 && hour < 12) return { greeting: '🌅 Good Morning', emoji: '🌅', time, message: 'Have a wonderful day ahead!' };
-        if (hour >= 12 && hour < 17) return { greeting: '☀️ Good Afternoon', emoji: '☀️', time, message: 'Hope you\'re having a great day!' };
-        if (hour >= 17 && hour < 21) return { greeting: '🌇 Good Evening', emoji: '🌇', time, message: 'Hope you had a productive day!' };
-        return { greeting: '🌙 Good Night', emoji: '🌙', time, message: 'Have a peaceful night!' };
-    } catch (e) { return { greeting: '👋 Hello', emoji: '👋', time: new Date().toLocaleTimeString(), message: 'Nice to see you!' }; }
+
+        const hour = parseInt(
+            now.toLocaleString('en-US', {
+                timeZone: tz,
+                hour12: false,
+                hour: '2-digit'
+            })
+        );
+
+        const time = now.toLocaleString('en-US', {
+            timeZone: tz,
+            hour12: true,
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit'
+        });
+
+        if (hour >= 5 && hour < 12) {
+            return {
+                greeting: '🌅 Good Morning',
+                emoji: '🌅',
+                time,
+                message: 'Have a wonderful day ahead!'
+            };
+        }
+
+        if (hour >= 12 && hour < 17) {
+            return {
+                greeting: '☀️ Good Afternoon',
+                emoji: '☀️',
+                time,
+                message: 'Hope you\'re having a great day!'
+            };
+        }
+
+        if (hour >= 17 && hour < 21) {
+            return {
+                greeting: '🌇 Good Evening',
+                emoji: '🌇',
+                time,
+                message: 'Hope you had a productive day!'
+            };
+        }
+
+        return {
+            greeting: '🌙 Good Night',
+            emoji: '🌙',
+            time,
+            message: 'Have a peaceful night!'
+        };
+    } catch (e) {
+        return {
+            greeting: '👋 Hello',
+            emoji: '👋',
+            time: new Date().toLocaleTimeString(),
+            message: 'Nice to see you!'
+        };
+    }
 }
 
 function getDayWithEmoji() {
     try {
         const now = new Date();
         const tz = settings.timezone || 'Africa/Lagos';
-        const day = now.toLocaleString('en-US', { timeZone: tz, weekday: 'long' });
-        const month = now.toLocaleString('en-US', { timeZone: tz, month: 'long' });
+
+        const day = now.toLocaleString('en-US', {
+            timeZone: tz,
+            weekday: 'long'
+        });
+
+        const month = now.toLocaleString('en-US', {
+            timeZone: tz,
+            month: 'long'
+        });
+
         const year = now.getFullYear();
-        const date = now.toLocaleString('en-US', { timeZone: tz, month: '2-digit', day: '2-digit', year: 'numeric' });
-        const map = { 'Monday': '📅', 'Tuesday': '🔥', 'Wednesday': '🌎', 'Thursday': '🚀', 'Friday': '🎉', 'Saturday': '🌈', 'Sunday': '☀️' };
-        return { day, month, year, date, emoji: map[day] || '📅' };
-    } catch (e) { return { day: 'Today', month: 'Month', year: 2025, date: '01/01/2026', emoji: '📅' }; }
+
+        const date = now.toLocaleString('en-US', {
+            timeZone: tz,
+            month: '2-digit',
+            day: '2-digit',
+            year: 'numeric'
+        });
+
+        const map = {
+            Monday: '📅',
+            Tuesday: '🔥',
+            Wednesday: '🌎',
+            Thursday: '🚀',
+            Friday: '🎉',
+            Saturday: '🌈',
+            Sunday: '☀️'
+        };
+
+        return {
+            day,
+            month,
+            year,
+            date,
+            emoji: map[day] || '📅'
+        };
+    } catch (e) {
+        return {
+            day: 'Today',
+            month: 'Month',
+            year: 2025,
+            date: '01/01/2026',
+            emoji: '📅'
+        };
+    }
 }
 
 async function getUserName(sock, userId, message) {
-    try { const n = message.pushName || message.key?.pushName; if (n) return n; const name = await sock.getName(userId); if (name && name !== userId) return name; return userId.split('@')[0] || 'User'; }
-    catch (e) { return userId.split('@')[0] || 'User'; }
+    try {
+        const n = message.pushName || message.key?.pushName;
+
+        if (n) return n;
+
+        const name = await sock.getName(userId);
+
+        if (name && name !== userId) return name;
+
+        return userId.split('@')[0] || 'User';
+    } catch (e) {
+        return userId.split('@')[0] || 'User';
+    }
 }
 
 function formatTime(seconds) {
     const days = Math.floor(seconds / (24 * 60 * 60));
     seconds = seconds % (24 * 60 * 60);
+
     const hours = Math.floor(seconds / (60 * 60));
     seconds = seconds % (60 * 60);
+
     const minutes = Math.floor(seconds / 60);
     seconds = Math.floor(seconds % 60);
+
     let time = '';
+
     if (days > 0) time += `${days}d `;
     if (hours > 0) time += `${hours}h `;
     if (minutes > 0) time += `${minutes}m `;
     if (seconds > 0 || time === '') time += `${seconds}s`;
+
     return time.trim();
 }
 
 function getSystemStats() {
     const uptimeInSeconds = process.uptime();
     const uptimeFormatted = formatTime(uptimeInSeconds);
+
     const totalMem = os.totalmem() / 1024 / 1024 / 1024;
     const usedGB = (os.totalmem() - os.freemem()) / 1024 / 1024 / 1024;
     const totalGB = os.totalmem() / 1024 / 1024 / 1024;
+
     const usagePercent = ((usedGB / totalMem) * 100).toFixed(1);
+
     const barLength = 10;
     const filled = Math.round((usagePercent / 100) * barLength);
     const empty = barLength - filled;
+
     const bar = '█'.repeat(filled) + '░'.repeat(empty);
-    return { uptime: uptimeFormatted, usedGB: usedGB.toFixed(2), totalGB: totalGB.toFixed(2), usagePercent, bar };
+
+    return {
+        uptime: uptimeFormatted,
+        usedGB: usedGB.toFixed(2),
+        totalGB: totalGB.toFixed(2),
+        usagePercent,
+        bar
+    };
 }
 
 // ---- COMMAND DATA ----
@@ -219,10 +369,12 @@ const allCommandsRaw = {
 function pickMedia() {
     const imagePath = path.join(__dirname, '../assets/bot_image.jpg');
     const gifPath = path.join(__dirname, '../assets/menu_video.mp4');
+
     const hasImage = fs.existsSync(imagePath);
     const hasGif = fs.existsSync(gifPath);
 
     let mediaType = 'Text';
+
     if (hasImage && hasGif) mediaType = Math.random() < 0.5 ? 'Image' : 'GIF';
     else if (hasImage) mediaType = 'Image';
     else if (hasGif) mediaType = 'GIF';
@@ -240,6 +392,7 @@ async function sendWithMediaType(sock, chatId, text, message, mentions, mediaTyp
             serverMessageId: -1
         }
     };
+
     if (mentions && mentions.length) ctx.mentionedJid = mentions;
 
     try {
@@ -258,7 +411,10 @@ async function sendWithMediaType(sock, chatId, text, message, mentions, mediaTyp
                 contextInfo: ctx
             }, { quoted: message });
         } else {
-            return await sock.sendMessage(chatId, { text, contextInfo: ctx }, { quoted: message });
+            return await sock.sendMessage(chatId, {
+                text,
+                contextInfo: ctx
+            }, { quoted: message });
         }
     } catch (e) {
         return await sock.sendMessage(chatId, { text }, { quoted: message });
@@ -274,6 +430,7 @@ function styleTop(styleId, title) {
     if (styleId === 5) return `  🌀◈── *${title}* ──◈❃🌸❃\n\n╭──────────●●➤\n`;
     if (styleId === 6) return `╭──〈 *${title}* 〉──💕⃝🕊️\n`;
     if (styleId === 7) return `╔══════════════════❥❥❥\n✧  *${title}*\n╚══════════════════❥❥❥\n`;
+
     return `◈──────────────────────◈\n           *${title}*\n◈──────────────────────◈\n\n`;
 }
 
@@ -285,6 +442,7 @@ function styleLine(styleId, content) {
     if (styleId === 5) return `┊ ${content}\n`;
     if (styleId === 6) return `⚚  ${content}\n`;
     if (styleId === 7) return `✧  ${content}\n`;
+
     return `▤ ${content}\n`;
 }
 
@@ -296,29 +454,37 @@ function styleBottom(styleId) {
     if (styleId === 5) return `╰──────·••─────•────●○\n\n`;
     if (styleId === 6) return `╰────────────────✌︎㋡\n\n`;
     if (styleId === 7) return `\n`;
+
     return `◈──────────────────────◈\n\n`;
 }
 
+// ---- LABAN-XMD FOOTER ----
 function styleFooter(styleId) {
-    if (styleId === 1) return `╭──「 *GAAJU-XMD* 」◆\n╰───★─☆─♪♪─◆`;
-    if (styleId === 2) return `◈──────────────────────◈\n           *GAAJU-XMD*\n◈──────────────────────◈`;
-    if (styleId === 3) return `╔══════════════════╗\n║ *GAAJU-XMD*\n╚══════════════════╝`;
-    if (styleId === 4) return `╭─〔 *GAAJU-XMD* 〕──┈𓊉꧂\n╰─────────────────┈𓊉꧂`;
-    if (styleId === 5) return `╭──────────●●➤\n┊ *GAAJU-XMD*\n╰──────·••─────•────●○`;
-    if (styleId === 6) return `╭──〈 *GAAJU-XMD* 〉──💕⃝🕊️\n╰──────────────✌︎㋡`;
-    if (styleId === 7) return `╔══════════════════❥❥❥\n✧  *GAAJU-XMD*\n╚══════════════════❥❥❥`;
-    return `◈──────────────────────◈\n           *GAAJU-XMD*\n◈──────────────────────◈`;
+    if (styleId === 1) return `╭──「 *LABAN-XMD* 」◆\n╰───★─☆─♪♪─◆`;
+    if (styleId === 2) return `◈──────────────────────◈\n           *LABAN-XMD*\n◈──────────────────────◈`;
+    if (styleId === 3) return `╔══════════════════╗\n║ *LABAN-XMD*\n╚══════════════════╝`;
+    if (styleId === 4) return `╭─〔 *LABAN-XMD* 〕──┈𓊉꧂\n╰─────────────────┈𓊉꧂`;
+    if (styleId === 5) return `╭──────────●●➤\n┊ *LABAN-XMD*\n╰──────·••─────•────●○`;
+    if (styleId === 6) return `╭──〈 *LABAN-XMD* 〉──💕⃝🕊️\n╰──────────────✌︎㋡`;
+    if (styleId === 7) return `╔══════════════════❥❥❥\n✧  *LABAN-XMD*\n╚══════════════════❥❥❥`;
+
+    return `◈──────────────────────◈\n           *LABAN-XMD*\n◈──────────────────────◈`;
 }
 
 function buildInfoSection(styleId, infoLines) {
-    let out = styleTop(styleId, 'GAAJU-XMD');
-    for (const l of infoLines) out += styleLine(styleId, l);
+    let out = styleTop(styleId, 'LABAN-XMD');
+
+    for (const l of infoLines) {
+        out += styleLine(styleId, l);
+    }
+
     out += styleBottom(styleId);
     return out;
 }
 
 function buildNoteSection(styleId) {
     let out = styleTop(styleId, '✍️ NOTE');
+
     const notes = [
         `Ⓟ  premium commands`,
         `Ⓕ  free commands`,
@@ -326,28 +492,35 @@ function buildNoteSection(styleId) {
         `Ⓓ  developer commands`,
         ` use .subscribe to upgrade`
     ];
-    for (const n of notes) out += styleLine(styleId, n);
+
+    for (const n of notes) {
+        out += styleLine(styleId, n);
+    }
+
     out += styleBottom(styleId);
     return out;
 }
 
 function buildMenuList(styleId) {
     let out = styleTop(styleId, 'ℹ️ INFO');
+
     out += styleLine(styleId, 'Reply with a number');
     out += styleLine(styleId, 'to open a menu');
     out += styleBottom(styleId);
 
     out += styleTop(styleId, 'MENU LIST');
+
     for (let i = 0; i < CATEGORY_ORDER.length; i++) {
         const name = titleCase(CATEGORY_ORDER[i]);
         out += styleLine(styleId, `${CIRCLED[i]} ${name} Menu`);
     }
+
     out += styleBottom(styleId);
     return out;
 }
 
 function buildCategoryMenu(styleId, categoryKey) {
-    let out = styleTop(styleId, 'GAAJU-XMD');
+    let out = styleTop(styleId, 'LABAN-XMD');
     out += styleBottom(styleId);
 
     out += buildNoteSection(styleId);
@@ -357,62 +530,90 @@ function buildCategoryMenu(styleId, categoryKey) {
     const headerTitle = `${emoji} ${displayName} Menu`.trim();
 
     out += styleTop(styleId, headerTitle);
+
     const cmds = allCommandsRaw[categoryKey] || [];
 
     if (cmds.length > 0 && typeof cmds[0] === 'object' && cmds[0].sub) {
         for (let i = 0; i < cmds.length; i++) {
             const sub = cmds[i];
+
             if (i > 0) out += styleLine(styleId, '');
+
             out += styleLine(styleId, `*${sub.sub}*`);
-            for (const c of sub.cmds) out += styleLine(styleId, c);
+
+            for (const c of sub.cmds) {
+                out += styleLine(styleId, c);
+            }
         }
     } else {
-        for (const c of cmds) out += styleLine(styleId, c);
+        for (const c of cmds) {
+            out += styleLine(styleId, c);
+        }
     }
+
     out += styleBottom(styleId);
 
     out += `              *© 2025-2026*\n\n`;
     out += styleFooter(styleId);
+
     return out;
 }
 
 function buildMainMenu(styleId, data, infoLines) {
     const { greeting, userName } = data;
+
     let out = `👋 Hello *${userName}*! ${greeting.message}\n\n`;
     out += `*${greeting.greeting}!* Here's your menu:\n\n`;
+
     out += buildInfoSection(styleId, infoLines);
     out += buildMenuList(styleId);
+
     out += `              *© 2025-2026*\n\n`;
     out += styleFooter(styleId);
+
     return out;
 }
 
 function buildFullMenu(styleId, data, infoLines) {
     const { greeting, userName } = data;
+
     let out = `👋 Hello *${userName}*! ${greeting.message}\n\n`;
     out += `*${greeting.greeting}!* Here's your full menu:\n\n`;
+
     out += buildInfoSection(styleId, infoLines);
     out += buildNoteSection(styleId);
 
     for (const catKey of CATEGORY_ORDER) {
         const cmds = allCommandsRaw[catKey];
+
         if (!cmds) continue;
+
         out += styleTop(styleId, catKey);
+
         if (cmds.length > 0 && typeof cmds[0] === 'object' && cmds[0].sub) {
             for (let i = 0; i < cmds.length; i++) {
                 const sub = cmds[i];
+
                 if (i > 0) out += styleLine(styleId, '');
+
                 out += styleLine(styleId, `*${sub.sub}*`);
-                for (const c of sub.cmds) out += styleLine(styleId, c);
+
+                for (const c of sub.cmds) {
+                    out += styleLine(styleId, c);
+                }
             }
         } else {
-            for (const c of cmds) out += styleLine(styleId, c);
+            for (const c of cmds) {
+                out += styleLine(styleId, c);
+            }
         }
+
         out += styleBottom(styleId);
     }
 
     out += `              *© 2025-2026*\n\n`;
     out += styleFooter(styleId);
+
     return out;
 }
 
@@ -430,11 +631,15 @@ async function gatherData(sock, senderId, message, pingMs, mediaType) {
     const sysStats = getSystemStats();
     const platform = getDeploymentPlatform();
 
-    const mediaDisplay = mediaType === 'GIF' ? 'GIF' : mediaType === 'Image' ? 'Image' : 'Text';
+    const mediaDisplay = mediaType === 'GIF'
+        ? 'GIF'
+        : mediaType === 'Image'
+            ? 'Image'
+            : 'Text';
 
     const infoLines = [
         `*👤 User:* ${userName}`,
-        `*🤖 BotName:* ${settings.botName || 'GAAJU-XMD'}`,
+        `*🤖 BotName:* ${settings.botName || 'LABAN-XMD'}`,
         `*🧠 Version:* ${settings.version || '3.0.5'}`,
         `*👑 BotOwner:* ${settings.botOwner || 'Chris Gaaju'}`,
         `*💳 BotPlan:* ${botPlan || 'Free'}`,
@@ -461,7 +666,14 @@ async function gatherData(sock, senderId, message, pingMs, mediaType) {
         `*💾 Ram:* ${sysStats.usedGB} GB of ${sysStats.totalGB} GB`
     ];
 
-    return { userName, greeting, dayInfo, styleId, fontId, infoLines };
+    return {
+        userName,
+        greeting,
+        dayInfo,
+        styleId,
+        fontId,
+        infoLines
+    };
 }
 
 function registerMenuSession(chatId, menuMessageId, senderJid, styleId, fontId) {
@@ -479,23 +691,38 @@ function registerMenuSession(chatId, menuMessageId, senderJid, styleId, fontId) 
 // =============================================================
 async function menuCommand(sock, chatId, message, args) {
     const senderId = message.key.participant || message.key.remoteJid;
+
     let sendChatId = chatId;
     let realSenderJid = senderId;
+
     if (chatId.endsWith('@lid')) {
         const realJid = message.key.remoteJidAlt;
-        if (realJid?.includes('@s.whatsapp.net')) { sendChatId = realJid; realSenderJid = realJid; }
+
+        if (realJid?.includes('@s.whatsapp.net')) {
+            sendChatId = realJid;
+            realSenderJid = realJid;
+        }
     }
 
     const start = Date.now();
+
     await sock.sendPresenceUpdate('composing', chatId);
 
     const media = pickMedia();
     const pingMs = Date.now() - start;
-    const data = await gatherData(sock, realSenderJid, message, pingMs, media.mediaType);
+
+    const data = await gatherData(
+        sock,
+        realSenderJid,
+        message,
+        pingMs,
+        media.mediaType
+    );
 
     const isFull = Array.isArray(args) && args[0] === 'fullmenu';
 
     let helpMessage;
+
     if (isFull) {
         helpMessage = buildFullMenu(data.styleId, data, data.infoLines);
     } else {
@@ -505,12 +732,25 @@ async function menuCommand(sock, chatId, message, args) {
     const finalMessage = applyFont(helpMessage, data.fontId);
 
     const sent = await sendWithMediaType(
-        sock, sendChatId, finalMessage, message, [realSenderJid],
-        media.mediaType, media.imagePath, media.gifPath
+        sock,
+        sendChatId,
+        finalMessage,
+        message,
+        [realSenderJid],
+        media.mediaType,
+        media.imagePath,
+        media.gifPath
     );
 
     if (!isFull && sent && sent.key && sent.key.id) {
-        registerMenuSession(sendChatId, sent.key.id, realSenderJid, data.styleId, data.fontId);
+        registerMenuSession(
+            sendChatId,
+            sent.key.id,
+            realSenderJid,
+            data.styleId,
+            data.fontId
+        );
+
         console.log('📌 Menu session registered:', sendChatId, '→', sent.key.id);
     }
 }
@@ -522,26 +762,34 @@ async function handleMenuNumberReply(sock, message, chatId) {
     try {
         const senderJid = message.key.participant || message.key.remoteJid;
         const msg = message.message;
+
         if (!msg) return false;
 
         let text = '';
+
         if (msg.conversation) text = msg.conversation;
         else if (msg.extendedTextMessage?.text) text = msg.extendedTextMessage.text;
         else if (msg.imageMessage?.caption) text = msg.imageMessage.caption;
         else if (msg.videoMessage?.caption) text = msg.videoMessage.caption;
+
         if (!text) return false;
 
         const trimmed = text.trim();
+
         if (!/^\d{1,2}$/.test(trimmed)) return false;
+
         const num = parseInt(trimmed, 10);
+
         if (num < 1 || num > 15) return false;
 
         const ctx = msg.extendedTextMessage?.contextInfo
             || msg.imageMessage?.contextInfo
             || msg.videoMessage?.contextInfo;
+
         if (!ctx || !ctx.stanzaId) return false;
 
         const session = menuSessions.get(chatId);
+
         if (!session) return false;
 
         if (ctx.stanzaId !== session.menuMessageId) return false;
@@ -549,9 +797,11 @@ async function handleMenuNumberReply(sock, message, chatId) {
         const senderMatches = senderJid === session.senderJid
             || senderJid === session.senderJid.replace('@s.whatsapp.net', '@lid')
             || message.key.fromMe;
+
         if (!senderMatches) return false;
 
         const categoryKey = CATEGORY_ORDER[num - 1];
+
         if (!categoryKey) return false;
 
         const styleId = getCurrentStyle() || session.styleId || 2;
@@ -561,10 +811,15 @@ async function handleMenuNumberReply(sock, message, chatId) {
         const finalMessage = applyFont(subMenu, fontId);
 
         // Send sub-menu WITHOUT media (Text Only)!
-        // We don't need imagePath or gifPath here because we pass 'Text'
         await sendWithMediaType(
-            sock, chatId, finalMessage, message, [senderJid],
-            'Text', null, null 
+            sock,
+            chatId,
+            finalMessage,
+            message,
+            [senderJid],
+            'Text',
+            null,
+            null
         );
 
         return true;
