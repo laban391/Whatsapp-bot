@@ -25,10 +25,11 @@ const {
 // ==================================================
 
 const app = express();
+
 const PORT = process.env.PORT || 3000;
 
-// Enter your MongoDB Atlas URI privately.
-// Replace the placeholders with your actual credentials.
+// Replace these placeholders with your MongoDB Atlas
+// credentials. Keep the real URI private.
 const MONGO_URI =
   'mongodb+srv://labanlaby34_db_user:labanlabanlaban@whatsapp.xv0gpkv.mongodb.net/';
 
@@ -63,9 +64,7 @@ const SessionSchema = new mongoose.Schema({
     default: Date.now
   },
 
-  lastConnected: {
-    type: Date
-  }
+  lastConnected: Date
 });
 
 const AuthDataSchema = new mongoose.Schema({
@@ -111,7 +110,6 @@ const MAX_RECONNECT_DELAY = 30000;
 
 // ==================================================
 // MONGODB AUTHENTICATION STORAGE
-// Each customer has separate WhatsApp credentials.
 // ==================================================
 
 async function useMongoAuthState(userId) {
@@ -171,7 +169,9 @@ async function useMongoAuthState(userId) {
 
       await Promise.all(
         ids.map(async (id) => {
-          const value = await readValue(`${type}:${id}`);
+          const value = await readValue(
+            `${type}:${id}`
+          );
 
           if (value !== null) {
             result[id] =
@@ -247,12 +247,73 @@ function clearReconnectTimer(userId) {
 }
 
 // ==================================================
+// WAIT FOR SOCKET INITIALIZATION
+// ==================================================
+
+function waitForConnecting(entry, timeoutMs = 20000) {
+  const sock = entry.user;
+
+  if (
+    entry.connectionState === 'connecting' ||
+    entry.connectionState === 'open'
+  ) {
+    return new Promise((resolve) => {
+      setTimeout(resolve, 1500);
+    });
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      sock.ev.off('connection.update', listener);
+    };
+
+    const finish = (error) => {
+      if (settled) return;
+
+      settled = true;
+      cleanup();
+
+      if (error) reject(error);
+      else resolve();
+    };
+
+    const timeout = setTimeout(() => {
+      finish(
+        new Error('WhatsApp connection timed out.')
+      );
+    }, timeoutMs);
+
+    const listener = (update) => {
+      if (update.connection === 'connecting') {
+        finish();
+      }
+
+      if (update.connection === 'open') {
+        finish();
+      }
+
+      if (update.connection === 'close') {
+        finish(
+          new Error(
+            'WhatsApp connection closed before pairing.'
+          )
+        );
+      }
+    };
+
+    sock.ev.on('connection.update', listener);
+  });
+}
+
+// ==================================================
 // RECONNECT SYSTEM
 // ==================================================
 
 function scheduleReconnect(userId, phoneNumber) {
   if (reconnectTimers.has(userId)) return;
-
   if (activeBots.has(userId)) return;
 
   const attempts =
@@ -286,7 +347,10 @@ function scheduleReconnect(userId, phoneNumber) {
 
       if (!credentials) return;
 
-      await connectBot(userId, phoneNumber);
+      if (!activeBots.has(userId)) {
+        await connectBot(userId, phoneNumber);
+      }
+
     } catch (error) {
       console.error(
         'Reconnect error:',
@@ -340,17 +404,17 @@ async function connectBot(userId, phoneNumber) {
     syncFullHistory: false
   });
 
-  // Used by main.js for tenant isolation.
   sock.__tenantId = userId;
 
   const entry = {
     user: sock,
-    phoneNumber
+    phoneNumber,
+    connectionState: 'connecting'
   };
 
   activeBots.set(userId, entry);
 
-  // Save authentication changes.
+  // Save credentials.
   sock.ev.on('creds.update', async () => {
     try {
       await auth.saveCreds();
@@ -362,12 +426,16 @@ async function connectBot(userId, phoneNumber) {
     }
   });
 
-  // Handle connection updates.
+  // Connection updates.
   sock.ev.on('connection.update', async (update) => {
     const {
       connection,
       lastDisconnect
     } = update;
+
+    if (connection) {
+      entry.connectionState = connection;
+    }
 
     if (connection === 'open') {
       clearReconnectTimer(userId);
@@ -394,7 +462,6 @@ async function connectBot(userId, phoneNumber) {
         console.error(error.message);
       }
 
-      // Remove only this socket, not a newer replacement.
       if (activeBots.get(userId)?.user === sock) {
         activeBots.delete(userId);
       }
@@ -412,6 +479,31 @@ async function connectBot(userId, phoneNumber) {
 
         reconnectAttempts.delete(userId);
         clearReconnectTimer(userId);
+
+        // Clear stale authentication after logout.
+        try {
+          await AuthData.deleteMany({ userId });
+
+          await UserSession.updateOne(
+            { userId },
+            {
+              $set: {
+                isConnected: false
+              }
+            }
+          );
+
+          console.log(
+            `Old authentication cleared for ${phoneNumber}`
+          );
+
+        } catch (error) {
+          console.error(
+            'Could not clear old authentication:',
+            error.message
+          );
+        }
+
       } else {
         console.log(
           `WhatsApp disconnected: ${phoneNumber}`
@@ -422,7 +514,7 @@ async function connectBot(userId, phoneNumber) {
     }
   });
 
-  // Handle incoming messages.
+  // Incoming messages.
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
 
@@ -438,7 +530,7 @@ async function connectBot(userId, phoneNumber) {
     }
   });
 
-  // Handle group participant changes.
+  // Group updates.
   sock.ev.on(
     'group-participants.update',
     async (update) => {
@@ -457,7 +549,7 @@ async function connectBot(userId, phoneNumber) {
 }
 
 // ==================================================
-// PHONE NUMBER NORMALIZATION
+// PHONE NUMBER
 // ==================================================
 
 function normalizeNumber(number) {
@@ -474,6 +566,7 @@ app.get('/', (req, res) => {
 <html>
 <head>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+
 <title>LABAN-XMD Pairing</title>
 
 <style>
@@ -532,6 +625,7 @@ button {
 </head>
 
 <body>
+
 <div class="container">
 
 <h1>LABAN-XMD</h1>
@@ -544,7 +638,7 @@ button {
 />
 
 <button onclick="getCode()">
-  Get Pairing Code
+Get Pairing Code
 </button>
 
 <div id="result"></div>
@@ -607,7 +701,7 @@ async function getCode() {
 });
 
 // ==================================================
-// SERVER STATUS
+// PING
 // ==================================================
 
 app.get('/ping', (req, res) => {
@@ -665,7 +759,7 @@ app.post('/pair', async (req, res) => {
 
     if (existingSession && credentials) {
       return res.status(409).json({
-        error: 'This number already has a saved session. Its existing session will be restored automatically.'
+        error: 'This number has saved credentials. If it was logged out, wait for the logout cleanup and try again.'
       });
     }
 
@@ -688,6 +782,14 @@ app.post('/pair', async (req, res) => {
       userId,
       phoneNumber
     );
+
+    await waitForConnecting(entry);
+
+    if (entry.user.authState?.creds?.registered) {
+      throw new Error(
+        'This WhatsApp session is already registered.'
+      );
+    }
 
     const code =
       await entry.user.requestPairingCode(
@@ -727,10 +829,11 @@ app.post('/pair', async (req, res) => {
 
 // ==================================================
 // RESTORE SAVED SESSIONS
-// IMPORTANT: FIND ALL SESSIONS, NOT JUST CONNECTED.
 // ==================================================
 
 async function restoreSessions() {
+  // Important: check ALL saved sessions.
+  // Do not filter only isConnected: true.
   const sessions = await UserSession.find({});
 
   console.log(
@@ -749,6 +852,7 @@ async function restoreSessions() {
         console.log(
           `No saved credentials for ${session.phoneNumber}; skipping.`
         );
+
         continue;
       }
 
@@ -786,7 +890,9 @@ async function startServer() {
     AuthData.init()
   ]);
 
-  console.log('MongoDB connected successfully.');
+  console.log(
+    'MongoDB connected successfully.'
+  );
 
   app.listen(PORT, '0.0.0.0', async () => {
     console.log(
@@ -805,11 +911,13 @@ async function startServer() {
 }
 
 // ==================================================
-// GRACEFUL SHUTDOWN
+// SHUTDOWN
 // ==================================================
 
 async function shutdown() {
-  console.log('Shutting down LABAN-XMD...');
+  console.log(
+    'Shutting down LABAN-XMD...'
+  );
 
   for (const timer of reconnectTimers.values()) {
     clearTimeout(timer);
@@ -838,7 +946,7 @@ process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
 // ==================================================
-// RUN
+// START
 // ==================================================
 
 startServer().catch((error) => {
