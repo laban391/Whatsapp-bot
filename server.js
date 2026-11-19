@@ -6,46 +6,34 @@ const mongoose = require('mongoose');
 const pino = require('pino');
 const path = require('path');
 
-const baileys = require('@whiskeysockets/baileys');
-
-const makeWASocket = baileys.default || baileys.makeWASocket;
-
 const {
+  default: makeWASocket,
   DisconnectReason,
-  initAuthCreds,
-  BufferJSON,
+  fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
+  BufferJSON,
+  initAuthCreds,
   proto
-} = baileys;
+} = require('@whiskeysockets/baileys');
 
 const {
   handleMessage,
   handleGroupUpdate
 } = require('./main');
 
-// ======================================================
+// ==================================================
 // LABAN-XMD CONFIGURATION
-// ======================================================
+// ==================================================
 
+const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
-// Replace YOUR_NEW_PASSWORD with your new MongoDB Atlas password.
-// URL-encode special characters in the password.
 const MONGO_URI =
   'mongodb+srv://labanlaby34_db_user:labanlabanlaban@whatsapp.xv0gpkv.mongodb.net/';
 
-if (MONGO_URI.includes('YOUR_NEW_PASSWORD')) {
-  console.error('[LABAN-XMD] Add your new MongoDB password in server.js.');
-  process.exit(1);
-}
-
 const logger = pino({ level: 'silent' });
 
-// ======================================================
-// EXPRESS SERVER
-// ======================================================
-
-const app = express();
+const MAX_RECONNECT_DELAY = 30000;
 
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
@@ -58,28 +46,15 @@ app.get('/', (req, res) => {
   res.sendFile(path.join(publicFolder, 'index.html'));
 });
 
-// ======================================================
-// ACTIVE CONNECTION STORAGE
-// ======================================================
+// ==================================================
+// MONGODB MODELS
+// ==================================================
 
-const activeBots = new Map();
-const reconnectTimers = new Map();
-const reconnectAttempts = new Map();
-const pairingLocks = new Set();
-
-let httpServer = null;
-let shuttingDown = false;
-
-// ======================================================
-// DATABASE MODELS
-// ======================================================
-
-const sessionSchema = new mongoose.Schema({
+const SessionSchema = new mongoose.Schema({
   userId: {
     type: String,
-    required: true,
     unique: true,
-    index: true
+    required: true
   },
   phoneNumber: {
     type: String,
@@ -93,17 +68,15 @@ const sessionSchema = new mongoose.Schema({
     type: Date,
     default: Date.now
   },
-  lastConnected: {
-    type: Date,
-    default: null
-  }
-}, { versionKey: false });
+  lastConnected: Date
+}, {
+  versionKey: false
+});
 
-const authDataSchema = new mongoose.Schema({
+const AuthDataSchema = new mongoose.Schema({
   userId: {
     type: String,
-    required: true,
-    index: true
+    required: true
   },
   key: {
     type: String,
@@ -111,28 +84,42 @@ const authDataSchema = new mongoose.Schema({
   },
   value: {
     type: String,
-    required: true
+    default: null
   }
-}, { versionKey: false });
+}, {
+  versionKey: false
+});
 
-authDataSchema.index(
+AuthDataSchema.index(
   { userId: 1, key: 1 },
   { unique: true }
 );
 
 const UserSession =
   mongoose.models.UserSession ||
-  mongoose.model('UserSession', sessionSchema);
+  mongoose.model('UserSession', SessionSchema);
 
 const AuthData =
   mongoose.models.AuthData ||
-  mongoose.model('AuthData', authDataSchema);
+  mongoose.model('AuthData', AuthDataSchema);
 
-// ======================================================
+// ==================================================
+// ACTIVE BOT STORAGE
+// ==================================================
+
+const activeBots = new Map();
+const reconnectTimers = new Map();
+const reconnectAttempts = new Map();
+const pairingLocks = new Set();
+
+let httpServer = null;
+let shuttingDown = false;
+
+// ==================================================
 // GENERAL HELPERS
-// ======================================================
+// ==================================================
 
-function normalizePhoneNumber(number) {
+function normalizeNumber(number) {
   return String(number || '').replace(/\D/g, '');
 }
 
@@ -144,206 +131,26 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function isSocketActive(sock) {
-  return Boolean(sock && sock.user && sock.user.id);
-}
-
-async function updateSessionStatus(userId, connected) {
+async function updateConnectionStatus(userId, connected) {
   try {
     await UserSession.updateOne(
       { userId },
       {
         $set: {
           isConnected: connected,
-          ...(connected ? { lastConnected: new Date() } : {})
+          ...(connected ? {
+            lastConnected: new Date()
+          } : {})
         }
       }
     );
   } catch (error) {
-    console.error('[DATABASE] Status update failed:', error.message);
+    console.error(
+      '[DATABASE] Status update failed:',
+      error.message
+    );
   }
 }
-
-// ======================================================
-// MONGODB AUTHENTICATION STORAGE
-// ======================================================
-
-async function useMongoAuthState(userId) {
-  const credentialsDocument = await AuthData.findOne({
-    userId,
-    key: '__creds__'
-  }).lean();
-
-  let creds;
-
-  if (credentialsDocument && credentialsDocument.value) {
-    creds = JSON.parse(
-      credentialsDocument.value,
-      BufferJSON.reviver
-    );
-  } else {
-    creds = initAuthCreds();
-  }
-
-  const saveCreds = async () => {
-    await AuthData.updateOne(
-      {
-        userId,
-        key: '__creds__'
-      },
-      {
-        $set: {
-          value: JSON.stringify(creds, BufferJSON.replacer)
-        }
-      },
-      { upsert: true }
-    );
-  };
-
-  const keys = {
-    get: async (type, ids) => {
-      const result = {};
-
-      if (!ids || !ids.length) {
-        return result;
-      }
-
-      const documents = await AuthData.find({
-        userId,
-        key: {
-          $in: ids.map(id => `${type}:${id}`)
-        }
-      }).lean();
-
-      for (const document of documents) {
-        const id = document.key.slice(type.length + 1);
-
-        try {
-          let value = JSON.parse(
-            document.value,
-            BufferJSON.reviver
-          );
-
-          if (type === 'app-state-sync-key' && value) {
-            value = proto.Message.AppStateSyncKeyData.fromObject(value);
-          }
-
-          result[id] = value;
-        } catch (error) {
-          console.error('[AUTH] Could not read key:', error.message);
-        }
-      }
-
-      return result;
-    },
-
-    set: async data => {
-      const operations = [];
-
-      for (const [type, entries] of Object.entries(data || {})) {
-        for (const [id, value] of Object.entries(entries || {})) {
-          const key = `${type}:${id}`;
-
-          if (value === null || value === undefined) {
-            operations.push({
-              deleteOne: {
-                filter: { userId, key }
-              }
-            });
-          } else {
-            operations.push({
-              updateOne: {
-                filter: { userId, key },
-                update: {
-                  $set: {
-                    value: JSON.stringify(value, BufferJSON.replacer)
-                  }
-                },
-                upsert: true
-              }
-            });
-          }
-        }
-      }
-
-      if (operations.length) {
-        await AuthData.bulkWrite(operations, {
-          ordered: false
-        });
-      }
-    }
-  };
-
-  return {
-    state: {
-      creds,
-      keys
-    },
-    saveCreds
-  };
-}
-
-// ======================================================
-// WAIT FOR WHATSAPP CONNECTION TO INITIALIZE
-// ======================================================
-
-function waitForPairingReady(sock, timeoutMs = 20000) {
-  return new Promise((resolve, reject) => {
-    let finished = false;
-
-    const cleanup = () => {
-      clearTimeout(timer);
-      sock.ev.off('connection.update', onUpdate);
-    };
-
-    const finish = error => {
-      if (finished) return;
-
-      finished = true;
-      cleanup();
-
-      if (error) {
-        reject(error);
-      } else {
-        resolve();
-      }
-    };
-
-    const onUpdate = update => {
-      if (
-        update.connection === 'connecting' ||
-        update.connection === 'open'
-      ) {
-        finish();
-      }
-
-      if (update.connection === 'close') {
-        finish(new Error(
-          'WhatsApp disconnected before the pairing code was generated.'
-        ));
-      }
-    };
-
-    const timer = setTimeout(() => {
-      finish(new Error(
-        'WhatsApp connection timed out. Please try again.'
-      ));
-    }, timeoutMs);
-
-    sock.ev.on('connection.update', onUpdate);
-
-    if (
-      sock.__connectionState === 'connecting' ||
-      sock.__connectionState === 'open'
-    ) {
-      finish();
-    }
-  });
-}
-
-// ======================================================
-// RECONNECTION SYSTEM
-// ======================================================
 
 function clearReconnectTimer(userId) {
   const timer = reconnectTimers.get(userId);
@@ -354,21 +161,210 @@ function clearReconnectTimer(userId) {
   }
 }
 
-function scheduleReconnect(userId, phoneNumber) {
-  if (shuttingDown || reconnectTimers.has(userId)) {
-    return;
+// ==================================================
+// MONGODB WHATSAPP AUTHENTICATION
+// ==================================================
+
+async function useMongoAuthState(userId) {
+  const CREDS_KEY = '__creds__';
+
+  async function readValue(key) {
+    const document = await AuthData.findOne({
+      userId,
+      key
+    }).lean();
+
+    if (!document || !document.value) {
+      return null;
+    }
+
+    return JSON.parse(
+      document.value,
+      BufferJSON.reviver
+    );
   }
 
-  const attempts = (reconnectAttempts.get(userId) || 0) + 1;
+  async function writeValue(key, value) {
+    if (value === null || value === undefined) {
+      await AuthData.deleteOne({
+        userId,
+        key
+      });
+
+      return;
+    }
+
+    const serialized = JSON.stringify(
+      value,
+      BufferJSON.replacer
+    );
+
+    await AuthData.updateOne(
+      {
+        userId,
+        key
+      },
+      {
+        $set: {
+          userId,
+          key,
+          value: serialized
+        }
+      },
+      {
+        upsert: true
+      }
+    );
+  }
+
+  const creds =
+    (await readValue(CREDS_KEY)) ||
+    initAuthCreds();
+
+  const keys = {
+    async get(type, ids) {
+      const result = {};
+
+      if (!Array.isArray(ids)) {
+        return result;
+      }
+
+      await Promise.all(
+        ids.map(async id => {
+          const value = await readValue(
+            `${type}:${id}`
+          );
+
+          if (value !== null) {
+            result[id] =
+              type === 'app-state-sync-key'
+                ? proto.Message.AppStateSyncKeyData.fromObject(value)
+                : value;
+          }
+        })
+      );
+
+      return result;
+    },
+
+    async set(data) {
+      const jobs = [];
+
+      for (const category of Object.keys(data || {})) {
+        for (const id of Object.keys(data[category] || {})) {
+          jobs.push(
+            writeValue(
+              `${category}:${id}`,
+              data[category][id]
+            )
+          );
+        }
+      }
+
+      await Promise.all(jobs);
+    },
+
+    async clear() {
+      await AuthData.deleteMany({ userId });
+    }
+  };
+
+  return {
+    state: {
+      creds,
+      keys
+    },
+
+    async saveCreds() {
+      await writeValue(CREDS_KEY, creds);
+    }
+  };
+}
+
+// ==================================================
+// WAIT FOR WHATSAPP CONNECTION
+// Original connection initialization approach
+// ==================================================
+
+function waitForConnecting(entry, timeoutMs = 20000) {
+  const sock = entry.user;
+
+  if (
+    entry.connectionState === 'connecting' ||
+    entry.connectionState === 'open'
+  ) {
+    return sleep(1500);
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      sock.ev.off('connection.update', listener);
+    };
+
+    const finish = error => {
+      if (settled) return;
+
+      settled = true;
+      cleanup();
+
+      if (error) {
+        reject(error);
+      } else {
+        resolve();
+      }
+    };
+
+    const timeout = setTimeout(() => {
+      finish(
+        new Error('WhatsApp connection timed out.')
+      );
+    }, timeoutMs);
+
+    const listener = update => {
+      if (
+        update.connection === 'connecting' ||
+        update.connection === 'open'
+      ) {
+        finish();
+      }
+
+      if (update.connection === 'close') {
+        finish(
+          new Error(
+            'WhatsApp disconnected before pairing.'
+          )
+        );
+      }
+    };
+
+    sock.ev.on('connection.update', listener);
+  });
+}
+
+// ==================================================
+// RECONNECT SYSTEM
+// ==================================================
+
+function scheduleReconnect(userId, phoneNumber) {
+  if (shuttingDown) return;
+  if (reconnectTimers.has(userId)) return;
+  if (activeBots.has(userId)) return;
+
+  const attempts =
+    (reconnectAttempts.get(userId) || 0) + 1;
+
   reconnectAttempts.set(userId, attempts);
 
   const delay = Math.min(
-    5000 * Math.pow(2, Math.min(attempts - 1, 5)),
-    120000
+    2000 * Math.pow(2, attempts - 1),
+    MAX_RECONNECT_DELAY
   );
 
   console.log(
-    `[RECONNECT] ${phoneNumber} retrying in ${Math.round(delay / 1000)} seconds`
+    `[RECONNECT] ${phoneNumber} retrying in ${delay}ms`
   );
 
   const timer = setTimeout(async () => {
@@ -379,9 +375,34 @@ function scheduleReconnect(userId, phoneNumber) {
     }
 
     try {
-      await connectBot(phoneNumber);
+      const session = await UserSession.findOne({
+        userId
+      }).lean();
+
+      if (!session) return;
+
+      const saved = await AuthData.findOne({
+        userId,
+        key: '__creds__'
+      }).lean();
+
+      if (!saved) return;
+
+      const creds = JSON.parse(
+        saved.value,
+        BufferJSON.reviver
+      );
+
+      if (!creds.registered) return;
+
+      await connectBot(userId, phoneNumber);
+
     } catch (error) {
-      console.error('[RECONNECT] Failed:', error.message);
+      console.error(
+        '[RECONNECT] Error:',
+        error.message
+      );
+
       scheduleReconnect(userId, phoneNumber);
     }
   }, delay);
@@ -389,72 +410,110 @@ function scheduleReconnect(userId, phoneNumber) {
   reconnectTimers.set(userId, timer);
 }
 
-// ======================================================
-// CONNECT WHATSAPP BOT
-// ======================================================
+// ==================================================
+// CONNECT WHATSAPP ACCOUNT
+// ==================================================
 
-async function connectBot(phoneNumber) {
-  const userId = getUserId(phoneNumber);
-
+async function connectBot(userId, phoneNumber) {
   if (shuttingDown) {
     throw new Error('Server is shutting down.');
   }
 
-  if (activeBots.has(userId)) {
-    return activeBots.get(userId);
+  const existing = activeBots.get(userId);
+
+  if (existing) {
+    return existing;
   }
 
   clearReconnectTimer(userId);
 
-  const { state, saveCreds } = await useMongoAuthState(userId);
+  const auth = await useMongoAuthState(userId);
+
+  // Keep the version lookup from your original server.
+  const latest = await fetchLatestBaileysVersion();
+  const version = latest.version;
+
+  console.log(
+    `[BAILEYS] Using version ${version.join('.')}`
+  );
 
   const sock = makeWASocket({
-    auth: {
-      creds: state.creds,
-      keys: makeCacheableSignalKeyStore(state.keys, logger)
-    },
+    version,
+
     logger,
-    browser: ['LABAN-XMD', 'Chrome', '1.0.0'],
+
+    auth: {
+      creds: auth.state.creds,
+      keys: makeCacheableSignalKeyStore(
+        auth.state.keys,
+        logger
+      )
+    },
+
+    browser: [
+      'Ubuntu',
+      'Chrome',
+      '20.0.04'
+    ],
+
     printQRInTerminal: false,
     markOnlineOnConnect: false,
     syncFullHistory: false,
     generateHighQualityLinkPreview: false
   });
 
+  // Used by the shared multi-user message handler.
   sock.__tenantId = userId;
   sock.__phoneNumber = phoneNumber;
-  sock.__authState = state;
-  sock.__connectionState = null;
 
-  activeBots.set(userId, sock);
+  const entry = {
+    user: sock,
+    phoneNumber,
+    auth,
+    authState: auth.state,
+    connectionState: 'connecting'
+  };
 
-  // Save authentication updates.
+  activeBots.set(userId, entry);
+
+  // Save WhatsApp credentials whenever they change.
   sock.ev.on('creds.update', async () => {
     try {
-      await saveCreds();
+      await auth.saveCreds();
     } catch (error) {
-      console.error('[AUTH] Credential save failed:', error.message);
+      console.error(
+        `[AUTH] Save failed for ${phoneNumber}:`,
+        error.message
+      );
     }
   });
 
-  // Monitor WhatsApp connection.
+  // WhatsApp connection updates.
   sock.ev.on('connection.update', async update => {
-    const { connection, lastDisconnect } = update;
+    const {
+      connection,
+      lastDisconnect
+    } = update;
 
-    sock.__connectionState = connection;
+    if (connection) {
+      entry.connectionState = connection;
+    }
 
     if (connection === 'open') {
+      clearReconnectTimer(userId);
       reconnectAttempts.delete(userId);
 
-      await updateSessionStatus(userId, true);
+      await updateConnectionStatus(userId, true);
 
-      console.log(`[CONNECTED] LABAN-XMD: ${phoneNumber}`);
+      console.log(
+        `[CONNECTED] ${phoneNumber}`
+      );
     }
 
     if (connection === 'close') {
-      await updateSessionStatus(userId, false);
+      await updateConnectionStatus(userId, false);
 
-      if (activeBots.get(userId) === sock) {
+      if (activeBots.get(userId)?.user === sock) {
         activeBots.delete(userId);
       }
 
@@ -468,27 +527,38 @@ async function connectBot(phoneNumber) {
         `[DISCONNECTED] ${phoneNumber} | ${statusCode || 'unknown'}`
       );
 
-      // Delete credentials only after an actual WhatsApp logout.
       if (loggedOut) {
-        console.log(`[LOGOUT] ${phoneNumber} logged out.`);
+        console.log(
+          `[LOGOUT] ${phoneNumber}`
+        );
 
         clearReconnectTimer(userId);
         reconnectAttempts.delete(userId);
 
+        // Clear authentication only on an actual WhatsApp logout.
         await AuthData.deleteMany({ userId });
 
         return;
       }
 
-      if (!shuttingDown) {
+      // Do not reconnect incomplete pairing attempts.
+      if (
+        !shuttingDown &&
+        auth.state.creds.registered
+      ) {
         scheduleReconnect(userId, phoneNumber);
       }
     }
   });
 
-  // Incoming messages.
-  sock.ev.on('messages.upsert', async ({ messages }) => {
-    if (!Array.isArray(messages)) return;
+  // Incoming WhatsApp messages.
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (
+      type !== 'notify' ||
+      !Array.isArray(messages)
+    ) {
+      return;
+    }
 
     for (const message of messages) {
       if (!message || !message.message) continue;
@@ -504,76 +574,94 @@ async function connectBot(phoneNumber) {
     }
   });
 
-  // Group updates.
-  sock.ev.on('group-participants.update', async update => {
-    try {
-      await handleGroupUpdate(sock, update);
-    } catch (error) {
-      console.error(
-        `[GROUP UPDATE ERROR] ${phoneNumber}:`,
-        error.stack || error.message
-      );
+  // Group participant updates.
+  sock.ev.on(
+    'group-participants.update',
+    async update => {
+      try {
+        await handleGroupUpdate(sock, update);
+      } catch (error) {
+        console.error(
+          `[GROUP ERROR] ${phoneNumber}:`,
+          error.stack || error.message
+        );
+      }
     }
-  });
-
-  return sock;
-}
-
-// ======================================================
-// PAIRING API
-// ======================================================
-
-async function handlePairRequest(req, res) {
-  const phoneNumber = normalizePhoneNumber(
-    req.body?.phoneNumber || req.body?.number
   );
 
-  if (!phoneNumber || phoneNumber.length < 8 || phoneNumber.length > 15) {
+  return entry;
+}
+
+// ==================================================
+// PAIRING API
+// ==================================================
+
+async function handlePairRequest(req, res) {
+  const phoneNumber = normalizeNumber(
+    req.body?.phoneNumber ||
+    req.body?.number
+  );
+
+  if (
+    phoneNumber.length < 8 ||
+    phoneNumber.length > 15
+  ) {
     return res.status(400).json({
       success: false,
-      error: 'Enter a valid phone number with country code. Use digits only.'
+      error: 'Enter a valid phone number with country code.'
     });
   }
 
   const userId = getUserId(phoneNumber);
 
   if (pairingLocks.has(userId)) {
-    return res.status(429).json({
+    return res.status(409).json({
       success: false,
-      error: 'Pairing is already in progress. Please wait.'
+      error: 'A pairing request is already running. Please wait.'
+    });
+  }
+
+  const existingEntry = activeBots.get(userId);
+
+  if (existingEntry) {
+    if (existingEntry.authState.creds.registered) {
+      return res.status(409).json({
+        success: false,
+        error: 'This number already has a saved WhatsApp session. It should reconnect automatically.'
+      });
+    }
+
+    return res.status(409).json({
+      success: false,
+      error: 'Pairing is already in progress for this number. Please wait.'
     });
   }
 
   pairingLocks.add(userId);
 
+  let entry = null;
+
   try {
-    const existingBot = activeBots.get(userId);
-
-    if (existingBot && isSocketActive(existingBot)) {
-      return res.status(409).json({
-        success: false,
-        error: 'This WhatsApp number is already connected.'
-      });
-    }
-
-    // Never generate a new pairing code for an existing session.
-    const savedCredentials = await AuthData.findOne({
+    const saved = await AuthData.findOne({
       userId,
       key: '__creds__'
     }).lean();
 
-    if (savedCredentials) {
+    if (saved) {
       const savedCreds = JSON.parse(
-        savedCredentials.value,
+        saved.value,
         BufferJSON.reviver
       );
 
       if (savedCreds.registered) {
         return res.status(409).json({
           success: false,
-          error: 'This number already has a saved session. It should reconnect automatically. Do not pair again unless you have logged out.'
+          error: 'This number already has a registered session. Do not pair again unless you have logged out.'
         });
       }
+
+      // Remove only incomplete, unregistered pairing data.
+      await AuthData.deleteMany({ userId });
     }
 
     await UserSession.updateOne(
@@ -590,48 +678,54 @@ async function handlePairRequest(req, res) {
       { upsert: true }
     );
 
-    const sock = await connectBot(phoneNumber);
+    entry = await connectBot(userId, phoneNumber);
 
-    if (sock.__authState?.creds?.registered) {
+    if (entry.authState.creds.registered) {
       return res.status(409).json({
         success: false,
         error: 'This number already has a registered WhatsApp session.'
       });
     }
 
-    // Wait for the socket to initialize before requesting a code.
-    await waitForPairingReady(sock);
+    await waitForConnecting(entry);
 
-    // Give the connection handshake a little time to settle.
-    await sleep(2000);
-
-    if (sock.__authState?.creds?.registered) {
+    if (entry.authState.creds.registered) {
       return res.status(409).json({
         success: false,
-        error: 'This number has already been registered.'
+        error: 'This number has already been paired.'
       });
     }
 
-    if (typeof sock.requestPairingCode !== 'function') {
+    if (
+      typeof entry.user.requestPairingCode !== 'function'
+    ) {
       throw new Error(
-        'Pairing code generation is unavailable in this Baileys version.'
+        'This installed Baileys version does not support pairing codes.'
       );
     }
 
-    // Pass the international phone number as digits only.
-    const rawCode = await sock.requestPairingCode(phoneNumber);
+    // Return the actual code generated by Baileys.
+    const rawCode =
+      await entry.user.requestPairingCode(phoneNumber);
 
-    if (!rawCode || !String(rawCode).trim()) {
-      throw new Error('WhatsApp did not return a pairing code. Try again.');
+    if (
+      typeof rawCode !== 'string' ||
+      !rawCode.trim()
+    ) {
+      throw new Error(
+        'WhatsApp did not return a pairing code.'
+      );
     }
 
-    // Preserve the code exactly as returned by Baileys.
-    const code = String(rawCode).trim();
+    const code = rawCode.trim();
 
-    console.log(`[PAIRING] Code generated for ${phoneNumber}`);
+    console.log(
+      `[PAIRING] Code requested for ${phoneNumber}`
+    );
 
     return res.json({
       success: true,
+      number: phoneNumber,
       phoneNumber,
       code,
       message: 'Open WhatsApp > Linked Devices > Link a Device > Link with phone number instead.'
@@ -643,9 +737,20 @@ async function handlePairRequest(req, res) {
       error.stack || error.message
     );
 
+    if (entry) {
+      try {
+        entry.user.end(undefined);
+      } catch {}
+
+      if (activeBots.get(userId)?.user === entry.user) {
+        activeBots.delete(userId);
+      }
+    }
+
     return res.status(500).json({
       success: false,
-      error: error.message || 'Could not generate pairing code.'
+      error: error.message ||
+        'Could not generate pairing code. Please try again.'
     });
 
   } finally {
@@ -656,66 +761,83 @@ async function handlePairRequest(req, res) {
 app.post('/api/pair', handlePairRequest);
 app.post('/pair', handlePairRequest);
 
-// ======================================================
+// ==================================================
+// SERVER STATUS
+// ==================================================
+
+app.get('/ping', (req, res) => {
+  res.json({
+    status: 'online',
+    service: 'LABAN-XMD',
+    activeConnections: activeBots.size
+  });
+});
+
+// ==================================================
 // RESTORE SESSIONS AFTER REDEPLOY
-// ======================================================
+// ==================================================
 
 async function restoreSessions() {
-  console.log('[RESTORE] Checking MongoDB for saved sessions...');
+  console.log(
+    '[RESTORE] Checking saved MongoDB sessions...'
+  );
 
   const sessions = await UserSession.find({}).lean();
 
   let restored = 0;
 
   for (const session of sessions) {
-    const { userId, phoneNumber } = session;
-
-    if (!userId || !phoneNumber || activeBots.has(userId)) {
-      continue;
-    }
-
-    const savedCredentials = await AuthData.findOne({
+    const {
       userId,
-      key: '__creds__'
-    }).lean();
+      phoneNumber
+    } = session;
 
-    if (!savedCredentials) {
-      await updateSessionStatus(userId, false);
+    if (
+      !userId ||
+      !phoneNumber ||
+      activeBots.has(userId)
+    ) {
       continue;
     }
-
-    let creds;
 
     try {
-      creds = JSON.parse(
-        savedCredentials.value,
+      const saved = await AuthData.findOne({
+        userId,
+        key: '__creds__'
+      }).lean();
+
+      if (!saved) {
+        await updateConnectionStatus(userId, false);
+        continue;
+      }
+
+      const creds = JSON.parse(
+        saved.value,
         BufferJSON.reviver
       );
-    } catch (error) {
-      console.error(
-        `[RESTORE] Invalid credentials for ${phoneNumber}:`,
-        error.message
-      );
-      continue;
-    }
 
-    if (!creds.registered) {
-      console.log(`[RESTORE] ${phoneNumber} has not completed pairing.`);
-      continue;
-    }
+      if (!creds.registered) {
+        console.log(
+          `[RESTORE] ${phoneNumber} has not completed pairing.`
+        );
 
-    try {
-      await connectBot(phoneNumber);
+        continue;
+      }
+
+      await connectBot(userId, phoneNumber);
 
       restored++;
 
-      console.log(`[RESTORE] Reconnection started for ${phoneNumber}.`);
+      console.log(
+        `[RESTORE] Reconnection started for ${phoneNumber}`
+      );
 
+      // Avoid starting all accounts at exactly the same time.
       await sleep(1200);
 
     } catch (error) {
       console.error(
-        `[RESTORE] Could not restore ${phoneNumber}:`,
+        `[RESTORE] ${phoneNumber}:`,
         error.message
       );
 
@@ -723,12 +845,14 @@ async function restoreSessions() {
     }
   }
 
-  console.log(`[RESTORE] Started ${restored} saved session(s).`);
+  console.log(
+    `[RESTORE] Started ${restored} saved session(s).`
+  );
 }
 
-// ======================================================
-// SERVER STARTUP
-// ======================================================
+// ==================================================
+// START SERVER AND DATABASE
+// ==================================================
 
 async function startServer() {
   await mongoose.connect(MONGO_URI, {
@@ -736,14 +860,21 @@ async function startServer() {
     serverSelectionTimeoutMS: 30000
   });
 
-  console.log('[DATABASE] MongoDB Atlas connected.');
+  await Promise.all([
+    UserSession.init(),
+    AuthData.init()
+  ]);
 
-  await UserSession.createIndexes();
-  await AuthData.createIndexes();
+  console.log(
+    '[DATABASE] MongoDB connected successfully.'
+  );
 
   httpServer = await new Promise((resolve, reject) => {
     const server = app.listen(PORT, '0.0.0.0', () => {
-      console.log(`[SERVER] LABAN-XMD running on port ${PORT}`);
+      console.log(
+        `[SERVER] LABAN-XMD running on port ${PORT}`
+      );
+
       resolve(server);
     });
 
@@ -755,16 +886,18 @@ async function startServer() {
   return httpServer;
 }
 
-// ======================================================
+// ==================================================
 // SAFE SHUTDOWN
-// ======================================================
+// ==================================================
 
 async function shutdown(signal) {
   if (shuttingDown) return;
 
   shuttingDown = true;
 
-  console.log(`[SERVER] ${signal}: saving sessions...`);
+  console.log(
+    `[SERVER] ${signal}: saving sessions...`
+  );
 
   for (const timer of reconnectTimers.values()) {
     clearTimeout(timer);
@@ -772,58 +905,49 @@ async function shutdown(signal) {
 
   reconnectTimers.clear();
 
-  const saveOperations = [];
+  // Save all authentication credentials before stopping.
+  const saveJobs = [];
 
-  for (const [userId, sock] of activeBots.entries()) {
-    try {
-      if (sock.__authState?.creds) {
-        saveOperations.push(
-          AuthData.updateOne(
-            {
-              userId,
-              key: '__creds__'
-            },
-            {
-              $set: {
-                value: JSON.stringify(
-                  sock.__authState.creds,
-                  BufferJSON.replacer
-                )
-              }
-            },
-            { upsert: true }
-          )
+  for (const [userId, entry] of activeBots.entries()) {
+    saveJobs.push(
+      entry.auth.saveCreds().catch(error => {
+        console.error(
+          `[SHUTDOWN] Credential save failed for ${userId}:`,
+          error.message
         );
-      }
-    } catch (error) {
-      console.error('[SHUTDOWN] Credential preparation failed:', error.message);
-    }
+      })
+    );
   }
 
-  await Promise.allSettled(saveOperations);
+  await Promise.allSettled(saveJobs);
 
-  for (const [userId, sock] of activeBots.entries()) {
+  for (const [userId, entry] of activeBots.entries()) {
     try {
-      await updateSessionStatus(userId, false);
-
-      if (typeof sock.end === 'function') {
-        sock.end(new Error('Server shutting down'));
-      }
+      await updateConnectionStatus(userId, false);
+      entry.user.end(undefined);
     } catch (error) {
-      console.error('[SHUTDOWN] Socket close failed:', error.message);
+      console.error(
+        '[SHUTDOWN] Socket close error:',
+        error.message
+      );
     }
   }
 
   activeBots.clear();
 
   if (httpServer) {
-    await new Promise(resolve => httpServer.close(resolve));
+    await new Promise(resolve => {
+      httpServer.close(resolve);
+    });
   }
 
   try {
     await mongoose.disconnect();
   } catch (error) {
-    console.error('[SHUTDOWN] MongoDB disconnect failed:', error.message);
+    console.error(
+      '[SHUTDOWN] MongoDB error:',
+      error.message
+    );
   }
 
   console.log('[SERVER] Shutdown complete.');
@@ -834,9 +958,9 @@ async function shutdown(signal) {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
-// ======================================================
+// ==================================================
 // START APPLICATION
-// ======================================================
+// ==================================================
 
 if (require.main === module) {
   startServer().catch(error => {
