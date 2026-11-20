@@ -161,8 +161,8 @@ global.ytch = process.env.YT_CHANNEL || 'LABAN-XMD';
 const channelInfo = {}; // LABAN-XMD does not impersonate another newsletter.
 
 // Required community membership. The owner is exempt.
-const REQUIRED_GROUP_INVITE = 'EBia4e4cBLfHCh7C6cnOqO';
-const REQUIRED_GROUP_LINK = 'https://chat.whatsapp.com/EBia4e4cBLfHCh7C6cnOqO';
+const REQUIRED_GROUP_INVITE = 'EBia4e4cBLfHCh7C6cnOQO';
+const REQUIRED_GROUP_LINK = 'https://chat.whatsapp.com/EBia4e4cBLfHCh7C6cnOQO';
 const REQUIRED_CHANNEL_LINK = 'https://whatsapp.com/channel/0029Vb9ptq3KbYMI70DGkM1c';
 const MEMBERSHIP_OWNER = '254708700675';
 const membershipFile = path.join(__dirname, 'data', 'membership-confirmations.json');
@@ -280,7 +280,6 @@ async function enforceCommunityMembership(sock, chatId, senderId, message, userM
 }
 
 async function handleMessages(sock, messageUpdate, printLog) {
-    let chatId;
     try {
         const { messages, type } = messageUpdate;
         const message = messages[0];
@@ -301,8 +300,18 @@ async function handleMessages(sock, messageUpdate, printLog) {
             return;
         }
 
-        chatId = message.key.remoteJid;
-        const senderId = message.key.participant || message.key.remoteJid;
+        const chatId = message.key.remoteJid;
+        // Prefer the real phone-number JID when WhatsApp supplies an LID/PN pair.
+        // This keeps owner checks and group-member matching consistent for newer accounts.
+        const senderCandidates = [
+            message.key.participantAlt,
+            message.key.remoteJidAlt,
+            message.key.participant,
+            message.key.remoteJid
+        ].filter(Boolean);
+        const senderId = senderCandidates.find(id => String(id).endsWith('@s.whatsapp.net')) ||
+            senderCandidates.find(id => !String(id).endsWith('@lid')) ||
+            senderCandidates[0];
         const isGroup = chatId.endsWith('@g.us');
         const senderIsSudo = await isSudo(senderId);
         const senderIsOwnerOrSudo = await isOwnerOrSudo(senderId, sock, chatId);
@@ -346,10 +355,8 @@ async function handleMessages(sock, messageUpdate, printLog) {
             '';
 
         // Apply the membership gate to commands only; owner 254708700675 is exempt.
-        // Never apply the community gate to messages sent by the bot account itself.
-        // In private chats, Baileys may put the recipient in remoteJid for fromMe messages,
-        // so the sender number cannot safely be identified from senderId alone.
-        if (userMessage.startsWith('.') && !message.key.fromMe) {
+        if (userMessage.startsWith('.')) {
+            // Fail closed: if membership cannot be checked, the gate sends a warning and blocks the command.
             const blocked = await enforceCommunityMembership(sock, chatId, senderId, message, userMessage);
             if (blocked) return;
         }
