@@ -161,8 +161,8 @@ global.ytch = process.env.YT_CHANNEL || 'LABAN-XMD';
 const channelInfo = {}; // LABAN-XMD does not impersonate another newsletter.
 
 // Required community membership. The owner is exempt.
-const REQUIRED_GROUP_INVITE = 'EBia4e4cBLfHCh7C6cnOQO';
-const REQUIRED_GROUP_LINK = 'https://chat.whatsapp.com/EBia4e4cBLfHCh7C6cnOQO';
+const REQUIRED_GROUP_INVITE = 'EBia4e4cBLfHCh7C6cnOqO';
+const REQUIRED_GROUP_LINK = 'https://chat.whatsapp.com/EBia4e4cBLfHCh7C6cnOqO';
 const REQUIRED_CHANNEL_LINK = 'https://whatsapp.com/channel/0029Vb9ptq3KbYMI70DGkM1c';
 const MEMBERSHIP_OWNER = '254708700675';
 const membershipFile = path.join(__dirname, 'data', 'membership-confirmations.json');
