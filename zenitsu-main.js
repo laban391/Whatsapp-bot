@@ -161,8 +161,8 @@ global.ytch = process.env.YT_CHANNEL || 'LABAN-XMD';
 const channelInfo = {}; // LABAN-XMD does not impersonate another newsletter.
 
 // Required community membership. The owner is exempt.
-const REQUIRED_GROUP_INVITE = 'EBia4e4cBLfHCh7C6cnOQO';
-const REQUIRED_GROUP_LINK = 'https://chat.whatsapp.com/EBia4e4cBLfHCh7C6cnOQO';
+const REQUIRED_GROUP_INVITE = 'EBia4e4cBLfHCh7C6cnOqO';
+const REQUIRED_GROUP_LINK = 'https://chat.whatsapp.com/EBia4e4cBLfHCh7C6cnOqO';
 const REQUIRED_CHANNEL_LINK = 'https://whatsapp.com/channel/0029Vb9ptq3KbYMI70DGkM1c';
 const MEMBERSHIP_OWNER = '254708700675';
 const membershipFile = path.join(__dirname, 'data', 'membership-confirmations.json');
@@ -204,11 +204,27 @@ async function getRequiredGroupJid(sock) {
 async function isRequiredGroupMember(sock, senderJid) {
     const groupJid = await getRequiredGroupJid(sock);
     const metadata = await sock.groupMetadata(groupJid);
+    const senderIds = new Set([String(senderJid || '')]);
     const senderPhone = phoneDigits(senderJid);
+
+    // Baileys may represent a WhatsApp account with an LID instead of a phone JID.
+    try {
+        const mapping = sock.signalRepository?.lidMapping;
+        if (String(senderJid || '').endsWith('@lid') && mapping?.getPNForLID) {
+            const pnJid = await mapping.getPNForLID(senderJid);
+            if (pnJid) senderIds.add(String(pnJid));
+        }
+    } catch (error) {
+        console.warn('[MEMBERSHIP] Could not resolve sender LID:', error.message);
+    }
+
     return (metadata.participants || []).some(participant => {
-        const participantJid = participant.id || participant.jid || participant.phoneNumber;
-        return participantJid === senderJid ||
-            (senderPhone && phoneDigits(participantJid) === senderPhone);
+        const candidateIds = [participant.id, participant.jid, participant.phoneNumber]
+            .filter(Boolean).map(String);
+        if (candidateIds.some(id => senderIds.has(id))) return true;
+
+        const candidatePhones = candidateIds.map(phoneDigits).filter(Boolean);
+        return Boolean(senderPhone && candidatePhones.includes(senderPhone));
     });
 }
 
@@ -301,17 +317,7 @@ async function handleMessages(sock, messageUpdate, printLog) {
         }
 
         const chatId = message.key.remoteJid;
-        // Prefer the real phone-number JID when WhatsApp supplies an LID/PN pair.
-        // This keeps owner checks and group-member matching consistent for newer accounts.
-        const senderCandidates = [
-            message.key.participantAlt,
-            message.key.remoteJidAlt,
-            message.key.participant,
-            message.key.remoteJid
-        ].filter(Boolean);
-        const senderId = senderCandidates.find(id => String(id).endsWith('@s.whatsapp.net')) ||
-            senderCandidates.find(id => !String(id).endsWith('@lid')) ||
-            senderCandidates[0];
+        const senderId = message.key.participant || message.key.remoteJid;
         const isGroup = chatId.endsWith('@g.us');
         const senderIsSudo = await isSudo(senderId);
         const senderIsOwnerOrSudo = await isOwnerOrSudo(senderId, sock, chatId);
@@ -356,7 +362,6 @@ async function handleMessages(sock, messageUpdate, printLog) {
 
         // Apply the membership gate to commands only; owner 254708700675 is exempt.
         if (userMessage.startsWith('.')) {
-            // Fail closed: if membership cannot be checked, the gate sends a warning and blocks the command.
             const blocked = await enforceCommunityMembership(sock, chatId, senderId, message, userMessage);
             if (blocked) return;
         }
