@@ -165,29 +165,10 @@ const REQUIRED_GROUP_INVITE = 'EBia4e4cBLfHCh7C6cnOqO';
 const REQUIRED_GROUP_LINK = 'https://chat.whatsapp.com/EBia4e4cBLfHCh7C6cnOqO?s=cl&p=a&iam=2';
 const REQUIRED_CHANNEL_LINK = 'https://whatsapp.com/channel/0029Vb9ptq3KbYMI70DGkM1c';
 const MEMBERSHIP_OWNER = '254708700675';
-const membershipFile = path.join(__dirname, 'data', 'membership-confirmations.json');
 let requiredGroupJid = null;
 
 function phoneDigits(jid) {
     return String(jid || '').split('@')[0].split(':')[0].replace(/\D/g, '');
-}
-
-function readChannelConfirmations() {
-    try {
-        if (!fs.existsSync(membershipFile)) return {};
-        return JSON.parse(fs.readFileSync(membershipFile, 'utf8')) || {};
-    } catch (error) {
-        console.error('[MEMBERSHIP] Could not read confirmations:', error.message);
-        return {};
-    }
-}
-
-function saveChannelConfirmation(phone) {
-    const dir = path.dirname(membershipFile);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    const confirmations = readChannelConfirmations();
-    confirmations[phone] = true;
-    fs.writeFileSync(membershipFile, JSON.stringify(confirmations, null, 2));
 }
 
 async function getRequiredGroupJid(sock) {
@@ -212,11 +193,10 @@ async function isRequiredGroupMember(sock, senderJid) {
     });
 }
 
-async function enforceCommunityMembership(sock, chatId, senderId, message, userMessage) {
+async function enforceCommunityMembership(sock, chatId, senderId, message, userMessage, context = {}) {
     const senderPhone = phoneDigits(senderId);
     if (senderPhone === MEMBERSHIP_OWNER) return false;
 
-    // These two access commands must remain available to users who need to join.
     if (userMessage === '.membership' || userMessage === '.channeljoined') {
         let isGroupMember = false;
         try {
@@ -243,10 +223,20 @@ async function enforceCommunityMembership(sock, chatId, senderId, message, userM
             return true;
         }
 
-        saveChannelConfirmation(senderPhone);
-        await sock.sendMessage(chatId, {
-            text: '✅ Your channel-follow confirmation has been saved. The bot cannot independently verify channel follows. You can now use LABAN-XMD.'
-        }, { quoted: message });
+        try {
+            if (!senderPhone || typeof context.saveChannelConfirmation !== 'function') {
+                throw new Error('MongoDB confirmation saver is unavailable.');
+            }
+            await context.saveChannelConfirmation(senderPhone);
+            await sock.sendMessage(chatId, {
+                text: '✅ Your channel-follow confirmation has been saved permanently. You can now use LABAN-XMD.'
+            }, { quoted: message });
+        } catch (error) {
+            console.error('[MEMBERSHIP] MongoDB save failed:', error.message);
+            await sock.sendMessage(chatId, {
+                text: '⚠️ Your confirmation could not be saved. Please try again shortly.'
+            }, { quoted: message });
+        }
         return true;
     }
 
@@ -268,10 +258,21 @@ async function enforceCommunityMembership(sock, chatId, senderId, message, userM
         return true;
     }
 
-    const confirmations = readChannelConfirmations();
-    if (!confirmations[senderPhone]) {
+    try {
+        if (typeof context.hasChannelConfirmation !== 'function') {
+            throw new Error('MongoDB confirmation checker is unavailable.');
+        }
+        const confirmed = await context.hasChannelConfirmation(senderPhone);
+        if (!confirmed) {
+            await sock.sendMessage(chatId, {
+                text: `🔒 *Follow the LABAN-XMD channel to use commands:*\n${REQUIRED_CHANNEL_LINK}\n\nAfter following, send *.channeljoined*. This is a self-confirmation because WhatsApp does not provide this bot with a reliable way to verify another user's channel follows.`
+            }, { quoted: message });
+            return true;
+        }
+    } catch (error) {
+        console.error('[MEMBERSHIP] MongoDB check failed:', error.message);
         await sock.sendMessage(chatId, {
-            text: `🔒 *Follow the LABAN-XMD channel to use commands:*\n${REQUIRED_CHANNEL_LINK}\n\nAfter following, send *.channeljoined*. This is a self-confirmation because WhatsApp does not provide this bot with a reliable way to verify another user's channel follows.`
+            text: '⚠️ I could not check your saved membership confirmation. Please try again shortly.'
         }, { quoted: message });
         return true;
     }
@@ -279,7 +280,7 @@ async function enforceCommunityMembership(sock, chatId, senderId, message, userM
     return false;
 }
 
-async function handleMessages(sock, messageUpdate, printLog) {
+async function handleMessages(sock, messageUpdate, printLog, context = {}) {
     let chatId;
     try {
         const { messages, type } = messageUpdate;
@@ -314,7 +315,7 @@ async function handleMessages(sock, messageUpdate, printLog) {
 
             if (buttonId === 'channel') {
                 await sock.sendMessage(chatId, {
-                    text: '📢 *Join our Channel:*\nhttps://whatsapp.com/channel/0029VbBvGgyFsn0alyIDjw0z'
+                    text: `📢 *Join our Channel:*\n${REQUIRED_CHANNEL_LINK}`
                 }, { quoted: message });
                 return;
             } else if (buttonId === 'owner') {
@@ -347,7 +348,7 @@ async function handleMessages(sock, messageUpdate, printLog) {
 
         // Apply the membership gate to commands only; owner 254708700675 is exempt.
         if (userMessage.startsWith('.')) {
-            const blocked = await enforceCommunityMembership(sock, chatId, senderId, message, userMessage);
+            const blocked = await enforceCommunityMembership(sock, chatId, senderId, message, userMessage, context);
             if (blocked) return;
         }
 
