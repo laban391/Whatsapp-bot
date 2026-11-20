@@ -29,7 +29,9 @@ const {
 const app = express();
 
 const PORT = Number(process.env.PORT) || 3000;
-const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://labanlaby34_db_user:labanlabanlaban@whatsapp.xv0gpkv.mongodb.net/';
+const MONGO_URI = process.env.MONGO_URI: 'mongodb+srv://labanlaby34_db_user:labanlabanlaban@whatsapp.xv0gpkv.mongodb.net/';
+
+const OWNER_NUMBER = '254708700675';
 
 const logger = pino({ level: 'silent' });
 
@@ -39,7 +41,7 @@ app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 if (!MONGO_URI) {
-    console.error('[FATAL] MONGO_URI is missing.');
+    console.error('[FATAL] MONGO_URI is missing. Set it in your hosting environment.');
     process.exit(1);
 }
 
@@ -114,6 +116,25 @@ AuthDataSchema.index(
     { unique: true }
 );
 
+// Persistent membership confirmation schema
+const MembershipConfirmationSchema = new mongoose.Schema({
+    phone: {
+        type: String,
+        unique: true,
+        required: true
+    },
+    channelConfirmed: {
+        type: Boolean,
+        default: true
+    },
+    confirmedAt: {
+        type: Date,
+        default: Date.now
+    }
+}, {
+    versionKey: false
+});
+
 const UserSession =
     mongoose.models.UserSession ||
     mongoose.model('UserSession', SessionSchema);
@@ -121,6 +142,13 @@ const UserSession =
 const AuthData =
     mongoose.models.AuthData ||
     mongoose.model('AuthData', AuthDataSchema);
+
+const MembershipConfirmation =
+    mongoose.models.MembershipConfirmation ||
+    mongoose.model(
+        'MembershipConfirmation',
+        MembershipConfirmationSchema
+    );
 
 // ==================================================
 // ACTIVE BOT STORAGE
@@ -164,7 +192,10 @@ async function updateConnectionStatus(userId, connected) {
             }
         );
     } catch (error) {
-        console.error('[DATABASE] Status update failed:', error.message);
+        console.error(
+            '[DATABASE] Status update failed:',
+            error.message
+        );
     }
 }
 
@@ -176,6 +207,57 @@ function clearReconnectTimer(userId) {
         reconnectTimers.delete(userId);
     }
 }
+
+// ==================================================
+// MEMBERSHIP PERSISTENCE
+// ==================================================
+
+const membershipContext = {
+
+    ownerPhone: OWNER_NUMBER,
+
+    saveChannelConfirmation: async phone => {
+        const normalizedPhone = normalizeNumber(phone);
+
+        if (!normalizedPhone) {
+            throw new Error(
+                'Cannot save membership confirmation without a phone number.'
+            );
+        }
+
+        await MembershipConfirmation.updateOne(
+            { phone: normalizedPhone },
+            {
+                $set: {
+                    channelConfirmed: true,
+                    confirmedAt: new Date()
+                }
+            },
+            { upsert: true }
+        );
+
+        console.log(
+            `[MEMBERSHIP] Channel confirmation saved for ${normalizedPhone}`
+        );
+
+        return true;
+    },
+
+    hasChannelConfirmation: async phone => {
+        const normalizedPhone = normalizeNumber(phone);
+
+        if (!normalizedPhone) {
+            return false;
+        }
+
+        const record = await MembershipConfirmation.findOne({
+            phone: normalizedPhone,
+            channelConfirmed: true
+        }).lean();
+
+        return !!record;
+    }
+};
 
 // ==================================================
 // MONGODB AUTHENTICATION
@@ -305,7 +387,10 @@ function waitForPairingReady(entry, timeoutMs = 20000) {
 
         function cleanup() {
             clearTimeout(timeout);
-            if (delayTimer) clearTimeout(delayTimer);
+
+            if (delayTimer) {
+                clearTimeout(delayTimer);
+            }
 
             sock.ev.off('connection.update', listener);
         }
@@ -360,7 +445,6 @@ function waitForPairingReady(entry, timeoutMs = 20000) {
 
         sock.ev.on('connection.update', listener);
 
-        // Handle a connection event that arrived before this listener.
         if (entry.connectionState === 'connecting') {
             listener({ connection: 'connecting' });
         } else if (entry.connectionState === 'open') {
@@ -591,7 +675,11 @@ async function connectBot(userId, phoneNumber) {
             if (!message || !message.message) continue;
 
             try {
-                await handleMessage(sock, message);
+                await handleMessage(
+                    sock,
+                    message,
+                    membershipContext
+                );
             } catch (error) {
                 console.error(
                     `[MESSAGE ERROR] ${phoneNumber}:`,
@@ -710,7 +798,6 @@ async function handlePairRequest(req, res) {
             });
         }
 
-        // Wait for Baileys connection readiness.
         await waitForPairingReady(entry);
 
         if (
@@ -737,7 +824,6 @@ async function handlePairRequest(req, res) {
             );
         }
 
-        // Request pairing code only once per request.
         const rawCode =
             await entry.user.requestPairingCode(phoneNumber);
 
@@ -893,10 +979,12 @@ async function startServer() {
 
     await Promise.all([
         UserSession.init(),
-        AuthData.init()
+        AuthData.init(),
+        MembershipConfirmation.init()
     ]);
 
     console.log('[DATABASE] MongoDB connected successfully.');
+    console.log('[MEMBERSHIP] MongoDB confirmation storage ready.');
 
     httpServer = await new Promise((resolve, reject) => {
         const server = app.listen(PORT, '0.0.0.0', () => {
@@ -1005,5 +1093,6 @@ module.exports = {
     startServer,
     connectBot,
     restoreSessions,
-    activeBots
+    activeBots,
+    MembershipConfirmation
 };
