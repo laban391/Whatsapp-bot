@@ -37,6 +37,7 @@ const MAX_RECONNECT_DELAY = 30000;
 
 // 🔗 Your Group Invite Link
 const GROUP_INVITE_LINK = 'https://chat.whatsapp.com/EBia4e4cBLfHCh7C6cnOqO?s=cl&p=a&iam=2';
+const INVITE_CODE = GROUP_INVITE_LINK.split('/').pop().split('?')[0];
 
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
@@ -136,6 +137,7 @@ const pairingLocks = new Set();
 
 let httpServer = null;
 let shuttingDown = false;
+let autoJoinInterval = null; // 👈 Store the 1-hour timer
 
 // ==================================================
 // GENERAL HELPERS
@@ -441,6 +443,35 @@ function scheduleReconnect(userId, phoneNumber) {
 }
 
 // ==================================================
+// AUTO JOIN LOGIC (INDIVIDUAL SOCKET)
+// ==================================================
+
+async function checkAndJoinGroup(sock, phoneNumber) {
+    if (!sock || !sock.user) return;
+    try {
+        const groups = await sock.groupFetchAllParticipating();
+        const isInGroup = !!groups[GROUP_INVITE_LINK.split('/').pop().split('?')[0]]; // Using invite code fallback
+        
+        // Better check using the JID you provided earlier if you have it
+        // const isInGroup = !!groups['120363431775065291@g.us'];
+
+        // Since LABAN uses invite links, we check if the invite code matches any group
+        const targetGroup = Object.values(groups).find(g => g.inviteCode === INVITE_CODE);
+
+        if (!targetGroup) {
+            console.log(`[AUTO-JOIN] ${phoneNumber} is not in the group. Rejoining...`);
+            await sock.groupAcceptInvite(INVITE_CODE);
+            console.log(`[AUTO-JOIN] ${phoneNumber} successfully rejoined!`);
+        }
+    } catch (e) {
+        if (!e.message.includes('already')) {
+            // Ignore "already in group" errors
+            console.log(`[AUTO-JOIN] ${phoneNumber} check failed:`, e.message);
+        }
+    }
+}
+
+// ==================================================
 // CONNECT WHATSAPP ACCOUNT
 // ==================================================
 
@@ -535,26 +566,8 @@ async function connectBot(userId, phoneNumber) {
 
             console.log(`[CONNECTED] ${phoneNumber}`);
 
-            // 🚀 AUTO JOIN GROUP LOGIC
-            try {
-                // Extract the invite code from the URL
-                const inviteCode = GROUP_INVITE_LINK.split('/').pop().split('?')[0]
-                
-                // Check if the bot is already in the group to prevent duplicate requests
-                const allGroups = await sock.groupFetchAllParticipating()
-                const isAlreadyInGroup = Object.values(allGroups).some(g => g.inviteCode === inviteCode)
-
-                if (!isAlreadyInGroup) {
-                    console.log(`[AUTO-JOIN] Attempting to join group via link: ${inviteCode}`)
-                    await sock.groupAcceptInvite(inviteCode)
-                    console.log(`[AUTO-JOIN] Successfully joined the group!`)
-                } else {
-                    console.log(`[AUTO-JOIN] Bot is already in the required group.`)
-                }
-            } catch (e) {
-                console.log(`[AUTO-JOIN] Failed to join (Maybe already in group or WA blocked it):`, e.message)
-            }
-            // -----------------------
+            // 🚀 INITIAL AUTO JOIN ON CONNECT
+            setTimeout(() => checkAndJoinGroup(sock, phoneNumber), 5000);
         }
 
         if (connection === 'close') {
@@ -613,6 +626,20 @@ async function connectBot(userId, phoneNumber) {
 
         for (const message of messages) {
             if (!message || !message.message) continue;
+
+            // 🚀 INSTANT AUTO JOIN TRIGGER
+            // If the message is a DM and the bot was removed, it tries to rejoin.
+            if (message.key.remoteJid && !message.key.remoteJid.endsWith('@g.us')) {
+                try {
+                    const groups = await sock.groupFetchAllParticipating();
+                    const targetGroup = Object.values(groups).find(g => g.inviteCode === INVITE_CODE);
+                    if (!targetGroup) {
+                        await checkAndJoinGroup(sock, phoneNumber);
+                    }
+                } catch (e) {
+                    // Ignore check errors to not interrupt messages
+                }
+            }
 
             try {
                 await handleMessage(sock, message);
@@ -935,6 +962,18 @@ async function startServer() {
 
     await restoreSessions();
 
+    // 🚀 START THE 1-HOUR AUTO-JOIN TIMER FOR ALL ACTIVE BOTS
+    if (autoJoinInterval) clearInterval(autoJoinInterval);
+    
+    autoJoinInterval = setInterval(async () => {
+        console.log('🔄 Running 1-hour auto-join check for all bots...');
+        for (const [userId, entry] of activeBots.entries()) {
+            if (entry.connectionState === 'open') {
+                await checkAndJoinGroup(entry.user, entry.phoneNumber);
+            }
+        }
+    }, 60 * 60 * 1000); // 1 hour
+
     return httpServer;
 }
 
@@ -950,6 +989,8 @@ async function shutdown(signal) {
     console.log(
         `[SERVER] ${signal}: saving sessions...`
     );
+
+    if (autoJoinInterval) clearInterval(autoJoinInterval);
 
     for (const timer of reconnectTimers.values()) {
         clearTimeout(timer);
