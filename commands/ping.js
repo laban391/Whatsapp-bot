@@ -14,7 +14,7 @@ async function pingCommand(sock, chatId, message) {
         const ping = Math.round(end - start);
 
         const botInfo = `⚡ Pong!
-ZENITSU BOT • ${ping}ms`;
+LABAN-XMD • ${ping}ms`;
 
         await sock.sendMessage(
             chatId,
