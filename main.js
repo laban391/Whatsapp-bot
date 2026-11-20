@@ -1,56 +1,40 @@
 'use strict';
 
-const engineModule = require('./zenitsu-main');
-const engine = engineModule.default || engineModule;
+// Compatibility bridge for the existing LABAN-XMD multi-user server.js.
+// The imported command engine expects Baileys' full messages.upsert object,
+// while server.js passes one message at a time.
+const engine = require('./zenitsu-main');
 const statusBoundSockets = new WeakSet();
-const engineHandleMessages = engine.handleMessages;
-const engineGroupUpdate = engine.handleGroupParticipantUpdate;
 
-if (typeof engineHandleMessages !== 'function') {
-    throw new Error('[LABAN-XMD] handleMessages missing from zenitsu-main.js');
-}
+async function handleMessage(sock, message) {
+  if (!message || !message.message) return;
 
-async function handleMessage(sock, message, context = {}) {
-    if (!message || !message.message) return;
+  // Attach status listeners once per WhatsApp socket.
+  if (sock && sock.ev && !statusBoundSockets.has(sock)) {
+    statusBoundSockets.add(sock);
+    sock.ev.on('status.update', async status => {
+      try { await engine.handleStatus(sock, status); }
+      catch (error) { console.error('[STATUS] update error:', error.message); }
+    });
+    sock.ev.on('messages.reaction', async status => {
+      try { await engine.handleStatus(sock, status); }
+      catch (error) { console.error('[STATUS] reaction error:', error.message); }
+    });
+  }
 
-    if (sock?.ev && !statusBoundSockets.has(sock)) {
-        statusBoundSockets.add(sock);
-        sock.ev.on('status.update', async status => {
-            try {
-                if (typeof engine.handleStatus === 'function') await engine.handleStatus(sock, status);
-            } catch (error) {
-                console.error('[STATUS ERROR]', error.message);
-            }
-        });
-        sock.ev.on('messages.reaction', async status => {
-            try {
-                if (typeof engine.handleStatus === 'function') await engine.handleStatus(sock, status);
-            } catch (error) {
-                console.error('[REACTION ERROR]', error.message);
-            }
-        });
-    }
-
-    const update = { messages: [message], type: 'notify' };
-    if (message.key?.remoteJid === 'status@broadcast') {
-        if (typeof engine.handleStatus === 'function') return engine.handleStatus(sock, update);
-        return;
-    }
-    return engineHandleMessages(sock, update, true, context);
+  const update = { messages: [message], type: 'notify' };
+  if (message.key && message.key.remoteJid === 'status@broadcast') {
+    return engine.handleStatus(sock, update);
+  }
+  return engine.handleMessages(sock, update, true);
 }
 
 async function handleGroupUpdate(sock, update) {
-    if (typeof engineGroupUpdate !== 'function') {
-        console.warn('[LABAN-XMD] Group handler unavailable.');
-        return;
-    }
-    return engineGroupUpdate(sock, update);
+  return engine.handleGroupParticipantUpdate(sock, update);
 }
 
 module.exports = {
-    handleMessage,
-    handleGroupUpdate,
-    handleStatus: engine.handleStatus
+  handleMessage,
+  handleGroupUpdate,
+  handleStatus: engine.handleStatus
 };
-
-console.log('[LABAN-XMD] Main bridge loaded successfully.');
