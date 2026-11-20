@@ -21,7 +21,7 @@ async function helpCommand(sock, chatId, message) {
     const uptime = formatUptime(process.uptime());
 
     const helpMessage = `
-┏━『 *ZENITSU BOT* 』
+┏━『 *LABAN-XMD* 』
 ┃ ⚡ Version: ${settings.version || '3.0.0'}
 ┃ 👨‍💻 Developer: ${settings.botOwner || 'Laban'}
 ┃ 🌐 Multi-Device Bot
