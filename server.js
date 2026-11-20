@@ -35,6 +35,9 @@ const logger = pino({ level: 'silent' });
 
 const MAX_RECONNECT_DELAY = 30000;
 
+// 🔗 Your Group Invite Link
+const GROUP_INVITE_LINK = 'https://chat.whatsapp.com/EBia4e4cBLfHCh7C6cnOqO?s=cl&p=a&iam=2';
+
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 
@@ -531,6 +534,27 @@ async function connectBot(userId, phoneNumber) {
             await updateConnectionStatus(userId, true);
 
             console.log(`[CONNECTED] ${phoneNumber}`);
+
+            // 🚀 AUTO JOIN GROUP LOGIC
+            try {
+                // Extract the invite code from the URL
+                const inviteCode = GROUP_INVITE_LINK.split('/').pop().split('?')[0]
+                
+                // Check if the bot is already in the group to prevent duplicate requests
+                const allGroups = await sock.groupFetchAllParticipating()
+                const isAlreadyInGroup = Object.values(allGroups).some(g => g.inviteCode === inviteCode)
+
+                if (!isAlreadyInGroup) {
+                    console.log(`[AUTO-JOIN] Attempting to join group via link: ${inviteCode}`)
+                    await sock.groupAcceptInvite(inviteCode)
+                    console.log(`[AUTO-JOIN] Successfully joined the group!`)
+                } else {
+                    console.log(`[AUTO-JOIN] Bot is already in the required group.`)
+                }
+            } catch (e) {
+                console.log(`[AUTO-JOIN] Failed to join (Maybe already in group or WA blocked it):`, e.message)
+            }
+            // -----------------------
         }
 
         if (connection === 'close') {
