@@ -346,7 +346,10 @@ async function handleMessages(sock, messageUpdate, printLog) {
             '';
 
         // Apply the membership gate to commands only; owner 254708700675 is exempt.
-        if (userMessage.startsWith('.')) {
+        // Never apply the community gate to messages sent by the bot account itself.
+        // In private chats, Baileys may put the recipient in remoteJid for fromMe messages,
+        // so the sender number cannot safely be identified from senderId alone.
+        if (userMessage.startsWith('.') && !message.key.fromMe) {
             const blocked = await enforceCommunityMembership(sock, chatId, senderId, message, userMessage);
             if (blocked) return;
         }
