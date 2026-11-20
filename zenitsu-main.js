@@ -161,8 +161,8 @@ global.ytch = process.env.YT_CHANNEL || 'LABAN-XMD';
 const channelInfo = {}; // LABAN-XMD does not impersonate another newsletter.
 
 // Required community membership. The owner is exempt.
-const REQUIRED_GROUP_INVITE = 'EBia4e4cBLfHCh7C6cnO';
-const REQUIRED_GROUP_LINK = 'https://chat.whatsapp.com/EBia4e4cBLfHCh7C6cnO';;
+const REQUIRED_GROUP_INVITE = 'EBia4e4cBLfHCh7C6cnOqO';
+const REQUIRED_GROUP_LINK = 'https://chat.whatsapp.com/EBia4e4cBLfHCh7C6cnOqO?s=cl&p=a&iam=2';
 const REQUIRED_CHANNEL_LINK = 'https://whatsapp.com/channel/0029Vb9ptq3KbYMI70DGkM1c';
 const MEMBERSHIP_OWNER = '254708700675';
 const membershipFile = path.join(__dirname, 'data', 'membership-confirmations.json');
@@ -204,27 +204,11 @@ async function getRequiredGroupJid(sock) {
 async function isRequiredGroupMember(sock, senderJid) {
     const groupJid = await getRequiredGroupJid(sock);
     const metadata = await sock.groupMetadata(groupJid);
-    const senderIds = new Set([String(senderJid || '')]);
     const senderPhone = phoneDigits(senderJid);
-
-    // Baileys may represent a WhatsApp account with an LID instead of a phone JID.
-    try {
-        const mapping = sock.signalRepository?.lidMapping;
-        if (String(senderJid || '').endsWith('@lid') && mapping?.getPNForLID) {
-            const pnJid = await mapping.getPNForLID(senderJid);
-            if (pnJid) senderIds.add(String(pnJid));
-        }
-    } catch (error) {
-        console.warn('[MEMBERSHIP] Could not resolve sender LID:', error.message);
-    }
-
     return (metadata.participants || []).some(participant => {
-        const candidateIds = [participant.id, participant.jid, participant.phoneNumber]
-            .filter(Boolean).map(String);
-        if (candidateIds.some(id => senderIds.has(id))) return true;
-
-        const candidatePhones = candidateIds.map(phoneDigits).filter(Boolean);
-        return Boolean(senderPhone && candidatePhones.includes(senderPhone));
+        const participantJid = participant.id || participant.jid || participant.phoneNumber;
+        return participantJid === senderJid ||
+            (senderPhone && phoneDigits(participantJid) === senderPhone);
     });
 }
 
@@ -296,6 +280,7 @@ async function enforceCommunityMembership(sock, chatId, senderId, message, userM
 }
 
 async function handleMessages(sock, messageUpdate, printLog) {
+    let chatId;
     try {
         const { messages, type } = messageUpdate;
         const message = messages[0];
@@ -316,7 +301,7 @@ async function handleMessages(sock, messageUpdate, printLog) {
             return;
         }
 
-        const chatId = message.key.remoteJid;
+        chatId = message.key.remoteJid;
         const senderId = message.key.participant || message.key.remoteJid;
         const isGroup = chatId.endsWith('@g.us');
         const senderIsSudo = await isSudo(senderId);
