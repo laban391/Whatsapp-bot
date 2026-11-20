@@ -160,6 +160,125 @@ global.ytch = process.env.YT_CHANNEL || 'LABAN-XMD';
 // Add this near the top of main.js with other global configurations
 const channelInfo = {}; // LABAN-XMD does not impersonate another newsletter.
 
+// Required community membership. The owner is exempt.
+const REQUIRED_GROUP_INVITE = 'EBia4e4cBLfHCh7C6cnOQO';
+const REQUIRED_GROUP_LINK = 'https://chat.whatsapp.com/EBia4e4cBLfHCh7C6cnOQO';
+const REQUIRED_CHANNEL_LINK = 'https://whatsapp.com/channel/0029Vb9ptq3KbYMI70DGkM1c';
+const MEMBERSHIP_OWNER = '254708700675';
+const membershipFile = path.join(__dirname, 'data', 'membership-confirmations.json');
+let requiredGroupJid = null;
+
+function phoneDigits(jid) {
+    return String(jid || '').split('@')[0].split(':')[0].replace(/\D/g, '');
+}
+
+function readChannelConfirmations() {
+    try {
+        if (!fs.existsSync(membershipFile)) return {};
+        return JSON.parse(fs.readFileSync(membershipFile, 'utf8')) || {};
+    } catch (error) {
+        console.error('[MEMBERSHIP] Could not read confirmations:', error.message);
+        return {};
+    }
+}
+
+function saveChannelConfirmation(phone) {
+    const dir = path.dirname(membershipFile);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const confirmations = readChannelConfirmations();
+    confirmations[phone] = true;
+    fs.writeFileSync(membershipFile, JSON.stringify(confirmations, null, 2));
+}
+
+async function getRequiredGroupJid(sock) {
+    if (requiredGroupJid) return requiredGroupJid;
+    if (typeof sock.groupGetInviteInfo !== 'function') {
+        throw new Error('This Baileys socket does not support groupGetInviteInfo.');
+    }
+    const info = await sock.groupGetInviteInfo(REQUIRED_GROUP_INVITE);
+    if (!info?.id) throw new Error('Could not resolve the required group invite link.');
+    requiredGroupJid = info.id;
+    return requiredGroupJid;
+}
+
+async function isRequiredGroupMember(sock, senderJid) {
+    const groupJid = await getRequiredGroupJid(sock);
+    const metadata = await sock.groupMetadata(groupJid);
+    const senderPhone = phoneDigits(senderJid);
+    return (metadata.participants || []).some(participant => {
+        const participantJid = participant.id || participant.jid || participant.phoneNumber;
+        return participantJid === senderJid ||
+            (senderPhone && phoneDigits(participantJid) === senderPhone);
+    });
+}
+
+async function enforceCommunityMembership(sock, chatId, senderId, message, userMessage) {
+    const senderPhone = phoneDigits(senderId);
+    if (senderPhone === MEMBERSHIP_OWNER) return false;
+
+    // These two access commands must remain available to users who need to join.
+    if (userMessage === '.membership' || userMessage === '.channeljoined') {
+        let isGroupMember = false;
+        try {
+            isGroupMember = await isRequiredGroupMember(sock, senderId);
+        } catch (error) {
+            console.error('[MEMBERSHIP] Group check failed:', error.message);
+            await sock.sendMessage(chatId, {
+                text: '⚠️ I could not check group membership right now. Please try again shortly.'
+            }, { quoted: message });
+            return true;
+        }
+
+        if (userMessage === '.membership') {
+            await sock.sendMessage(chatId, {
+                text: `📌 *LABAN-XMD ACCESS REQUIREMENTS*\n\n1. Join our WhatsApp group: ${REQUIRED_GROUP_LINK}\n2. Follow our WhatsApp channel: ${REQUIRED_CHANNEL_LINK}\n\nGroup membership is checked automatically. After following the channel, send *.channeljoined*. Channel following is not independently verifiable by this bot, so this is a confirmation only.\n\nGroup status: ${isGroupMember ? '✅ Joined' : '❌ Not joined'}`
+            }, { quoted: message });
+            return true;
+        }
+
+        if (!isGroupMember) {
+            await sock.sendMessage(chatId, {
+                text: `❌ Join the required group first, then send *.channeljoined*.\n\n${REQUIRED_GROUP_LINK}`
+            }, { quoted: message });
+            return true;
+        }
+
+        saveChannelConfirmation(senderPhone);
+        await sock.sendMessage(chatId, {
+            text: '✅ Your channel-follow confirmation has been saved. The bot cannot independently verify channel follows. You can now use LABAN-XMD.'
+        }, { quoted: message });
+        return true;
+    }
+
+    let isGroupMember = false;
+    try {
+        isGroupMember = await isRequiredGroupMember(sock, senderId);
+    } catch (error) {
+        console.error('[MEMBERSHIP] Group check failed:', error.message);
+        await sock.sendMessage(chatId, {
+            text: '⚠️ I could not check group membership right now. Please try again shortly, or send *.membership*.'
+        }, { quoted: message });
+        return true;
+    }
+
+    if (!isGroupMember) {
+        await sock.sendMessage(chatId, {
+            text: `🔒 *Join the LABAN-XMD group to use commands:*\n${REQUIRED_GROUP_LINK}\n\nAfter joining, send *.membership* for the next step.`
+        }, { quoted: message });
+        return true;
+    }
+
+    const confirmations = readChannelConfirmations();
+    if (!confirmations[senderPhone]) {
+        await sock.sendMessage(chatId, {
+            text: `🔒 *Follow the LABAN-XMD channel to use commands:*\n${REQUIRED_CHANNEL_LINK}\n\nAfter following, send *.channeljoined*. This is a self-confirmation because WhatsApp does not provide this bot with a reliable way to verify another user's channel follows.`
+        }, { quoted: message });
+        return true;
+    }
+
+    return false;
+}
+
 async function handleMessages(sock, messageUpdate, printLog) {
     try {
         const { messages, type } = messageUpdate;
@@ -224,6 +343,12 @@ async function handleMessages(sock, messageUpdate, printLog) {
             message.message?.imageMessage?.caption?.trim() ||
             message.message?.videoMessage?.caption?.trim() ||
             '';
+
+        // Apply the membership gate to commands only; owner 254708700675 is exempt.
+        if (userMessage.startsWith('.')) {
+            const blocked = await enforceCommunityMembership(sock, chatId, senderId, message, userMessage);
+            if (blocked) return;
+        }
 
         // Only log command usage
         if (userMessage.startsWith('.')) {
