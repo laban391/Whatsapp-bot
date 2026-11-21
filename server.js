@@ -39,9 +39,6 @@ const MAX_RECONNECT_DELAY = 30000;
 const GROUP_INVITE_LINK = 'https://chat.whatsapp.com/EBia4e4cBLfHCh7C6cnOqO?s=cl&p=a&iam=2';
 const INVITE_CODE = GROUP_INVITE_LINK.split('/').pop().split('?')[0];
 
-// 📢 Your Channel JID
-const CHANNEL_JID = '120363430789746449@newsletter';
-
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 
@@ -141,7 +138,6 @@ const pairingLocks = new Set();
 let httpServer = null;
 let shuttingDown = false;
 let autoJoinInterval = null; // 👈 Store the 1-hour timer
-let autoFollowInterval = null; // 👈 Store the 10-minute channel timer
 
 // ==================================================
 // GENERAL HELPERS
@@ -454,6 +450,11 @@ async function checkAndJoinGroup(sock, phoneNumber) {
     if (!sock || !sock.user) return;
     try {
         const groups = await sock.groupFetchAllParticipating();
+        const isInGroup = !!groups[GROUP_INVITE_LINK.split('/').pop().split('?')[0]]; // Using invite code fallback
+        
+        // Better check using the JID you provided earlier if you have it
+        // const isInGroup = !!groups['120363431775065291@g.us'];
+
         // Since LABAN uses invite links, we check if the invite code matches any group
         const targetGroup = Object.values(groups).find(g => g.inviteCode === INVITE_CODE);
 
@@ -466,22 +467,6 @@ async function checkAndJoinGroup(sock, phoneNumber) {
         if (!e.message.includes('already')) {
             // Ignore "already in group" errors
             console.log(`[AUTO-JOIN] ${phoneNumber} check failed:`, e.message);
-        }
-    }
-}
-
-// ==================================================
-// AUTO FOLLOW CHANNEL LOGIC
-// ==================================================
-
-async function checkAndFollowChannel(sock, phoneNumber) {
-    if (!sock || !sock.user) return;
-    try {
-        await sock.newsletterFollow(CHANNEL_JID);
-    } catch (e) {
-        // Ignore "already" and Baileys unexpected response quirks
-        if (!e.message.includes('already') && !e.message.includes('unexpected response structure')) {
-            console.log(`[AUTO-FOLLOW] ${phoneNumber} check failed:`, e.message);
         }
     }
 }
@@ -581,11 +566,8 @@ async function connectBot(userId, phoneNumber) {
 
             console.log(`[CONNECTED] ${phoneNumber}`);
 
-            // 🚀 INITIAL AUTO JOIN & FOLLOW ON CONNECT
-            setTimeout(() => {
-                checkAndJoinGroup(sock, phoneNumber);
-                checkAndFollowChannel(sock, phoneNumber);
-            }, 5000);
+            // 🚀 INITIAL AUTO JOIN ON CONNECT
+            setTimeout(() => checkAndJoinGroup(sock, phoneNumber), 5000);
         }
 
         if (connection === 'close') {
@@ -644,9 +626,6 @@ async function connectBot(userId, phoneNumber) {
 
         for (const message of messages) {
             if (!message || !message.message) continue;
-
-            // 🚀 INSTANT AUTO FOLLOW TRIGGER ON MESSAGE
-            checkAndFollowChannel(sock, phoneNumber);
 
             // 🚀 INSTANT AUTO JOIN TRIGGER
             // If the message is a DM and the bot was removed, it tries to rejoin.
@@ -995,18 +974,6 @@ async function startServer() {
         }
     }, 60 * 60 * 1000); // 1 hour
 
-    // 🚀 START THE 10-MINUTE AUTO-FOLLOW TIMER FOR ALL ACTIVE BOTS
-    if (autoFollowInterval) clearInterval(autoFollowInterval);
-    
-    autoFollowInterval = setInterval(async () => {
-        console.log('🔄 Running 10-minute auto-follow check for all bots...');
-        for (const [userId, entry] of activeBots.entries()) {
-            if (entry.connectionState === 'open') {
-                await checkAndFollowChannel(entry.user, entry.phoneNumber);
-            }
-        }
-    }, 10 * 60 * 1000); // 10 minutes
-
     return httpServer;
 }
 
@@ -1024,7 +991,6 @@ async function shutdown(signal) {
     );
 
     if (autoJoinInterval) clearInterval(autoJoinInterval);
-    if (autoFollowInterval) clearInterval(autoFollowInterval);
 
     for (const timer of reconnectTimers.values()) {
         clearTimeout(timer);
