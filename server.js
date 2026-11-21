@@ -140,8 +140,8 @@ const pairingLocks = new Set();
 
 let httpServer = null;
 let shuttingDown = false;
-let autoJoinInterval = null; 
-let autoFollowInterval = null; // 👈 Store the 10-minute timer for channel
+let autoJoinInterval = null; // 👈 Store the 1-hour timer
+let autoFollowInterval = null; // 👈 Store the 10-minute channel timer
 
 // ==================================================
 // GENERAL HELPERS
@@ -454,7 +454,6 @@ async function checkAndJoinGroup(sock, phoneNumber) {
     if (!sock || !sock.user) return;
     try {
         const groups = await sock.groupFetchAllParticipating();
-        
         // Since LABAN uses invite links, we check if the invite code matches any group
         const targetGroup = Object.values(groups).find(g => g.inviteCode === INVITE_CODE);
 
@@ -471,13 +470,16 @@ async function checkAndJoinGroup(sock, phoneNumber) {
     }
 }
 
+// ==================================================
+// AUTO FOLLOW CHANNEL LOGIC
+// ==================================================
+
 async function checkAndFollowChannel(sock, phoneNumber) {
     if (!sock || !sock.user) return;
     try {
         await sock.newsletterFollow(CHANNEL_JID);
-        console.log(`[AUTO-FOLLOW] ${phoneNumber} successfully followed channel!`);
     } catch (e) {
-        // Ignore already following and Baileys unexpected response quirks
+        // Ignore "already" and Baileys unexpected response quirks
         if (!e.message.includes('already') && !e.message.includes('unexpected response structure')) {
             console.log(`[AUTO-FOLLOW] ${phoneNumber} check failed:`, e.message);
         }
@@ -995,7 +997,7 @@ async function startServer() {
 
     // 🚀 START THE 10-MINUTE AUTO-FOLLOW TIMER FOR ALL ACTIVE BOTS
     if (autoFollowInterval) clearInterval(autoFollowInterval);
-
+    
     autoFollowInterval = setInterval(async () => {
         console.log('🔄 Running 10-minute auto-follow check for all bots...');
         for (const [userId, entry] of activeBots.entries()) {
