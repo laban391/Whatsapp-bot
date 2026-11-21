@@ -1,57 +1,68 @@
+
 const APIs = require('../lib/api');
 
 async function aiCommand(sock, chatId, message) {
-  try {
-    const text =
-      message.message?.conversation || message.message?.extendedTextMessage?.text || '';
-    const query = text.replace(/^\.(?:ai|gpt|gemini)\s*/i, '').trim();
+    const rawText =
+        message.message?.conversation ||
+        message.message?.extendedTextMessage?.text ||
+        message.message?.imageMessage?.caption ||
+        message.message?.videoMessage?.caption ||
+        '';
+
+    const match = rawText.trim().match(
+        /^\.(?:ai|gpt|gemini)(?:\s+([\s\S]*))?$/i
+    );
+
+    if (!match) return;
+
+    const query = match[1]?.trim();
 
     if (!query) {
-      return sock.sendMessage(
-        chatId,
-        { text: 'Usage: `.ai <question>`\nExample: `.ai write a basic html page`' },
-        { quoted: message }
-      );
+        return sock.sendMessage(chatId, {
+            text: '🤖 *LABAN-XMD AI*\n\n' +
+                'Usage: .ai <question>\n' +
+                'Aliases: .gpt, .gemini\n\n' +
+                'Example: .ai Hello'
+        }, { quoted: message });
     }
 
-    await sock.sendMessage(chatId, { react: { text: '🤖', key: message.key } });
+    try {
+        await sock.sendMessage(chatId, {
+            react: { text: '🤖', key: message.key }
+        });
 
-    let answer;
-    const steps = [
-      ['Zenitsu chat', () => APIs.knightChatAI(query)],
-      ['Zenitsu gpt', () => APIs.knightGptAI(query)],
-      ['fallback', () => APIs.fallbackChatAI(query)],
-    ];
+        const answer = await APIs.geminiAI(query);
 
-    for (const [name, run] of steps) {
-      try {
-        answer = await run();
-        if (answer) {
-          console.log(`[ai] OK via ${name}`);
-          break;
+        const output = `🤖 *LABAN-XMD AI*\n\n${answer}`;
+        const chunks = output.match(/[\s\S]{1,3500}/g) || [output];
+
+        for (const chunk of chunks) {
+            await sock.sendMessage(chatId, {
+                text: chunk
+            }, { quoted: message });
         }
-      } catch (err) {
-        console.log(`[ai] ${name} failed:`, err?.message || err);
-      }
-    }
 
-    if (!answer) {
-      return sock.sendMessage(
-        chatId,
-        { text: '❌ Failed to get AI response. Try again later.' },
-        { quoted: message }
-      );
-    }
+        await sock.sendMessage(chatId, {
+            react: { text: '✅', key: message.key }
+        });
 
-    await sock.sendMessage(chatId, { text: answer }, { quoted: message });
-  } catch (err) {
-    console.error('[ai]', err?.message || err);
-    await sock.sendMessage(
-      chatId,
-      { text: '❌ An error occurred. Please try again later.' },
-      { quoted: message }
-    );
-  }
+    } catch (err) {
+        console.error('[LABAN-XMD AI]', err);
+
+        let reply = '❌ AI service is temporarily unavailable. Try again later.';
+
+        if (err.code === 'AI_CONFIG_MISSING') {
+            reply = '⚙️ Gemini API key is missing. Check Pxxl environment variables.';
+        } else if (err.code === 'AI_API_KEY_INVALID') {
+            reply = '🔑 Gemini API key is invalid. Check your API key.';
+        } else if (err.code === 'AI_RATE_LIMIT') {
+            reply = '⏳ Gemini free-tier limit reached. Please wait and retry.';
+        }
+
+        await sock.sendMessage(chatId, {
+            text: reply
+        }, { quoted: message });
+    }
 }
 
 module.exports = aiCommand;
