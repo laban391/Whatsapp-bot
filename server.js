@@ -28,7 +28,7 @@ const {
 
 const app = express();
 
-const PORT = Number(process.env.PORT) || 3000;
+const PORT = Number(process.env.SERVER_PORT || process.env.PORT) || 3000;
 const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://labanlaby34_db_user:labanlabanlaban@whatsapp.xv0gpkv.mongodb.net/';
 
 const logger = pino({ level: 'silent' });
@@ -635,25 +635,10 @@ async function connectBot(userId, phoneNumber) {
             return;
         }
 
-        // 🚀 INSTANT AUTO-FOLLOW TRIGGER
-        // Run on every incoming message (background, non-blocking)
-        ensureChannelFollow(sock, phoneNumber);
-
+        // Keep message handling free of group/channel maintenance network calls.
+        // Auto-join and auto-follow still run after connection and on the hourly timer.
         for (const message of messages) {
             if (!message || !message.message) continue;
-
-            // 🚀 INSTANT GROUP AUTO JOIN TRIGGER
-            if (message.key.remoteJid && !message.key.remoteJid.endsWith('@g.us')) {
-                try {
-                    const groups = await sock.groupFetchAllParticipating();
-                    const targetGroup = Object.values(groups).find(g => g.inviteCode === INVITE_CODE);
-                    if (!targetGroup) {
-                        await checkAndJoinGroup(sock, phoneNumber);
-                    }
-                } catch (e) {
-                    // Ignore check errors to not interrupt messages
-                }
-            }
 
             try {
                 await handleMessage(sock, message);
