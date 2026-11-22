@@ -853,7 +853,7 @@ app.post('/pair', handlePairRequest);
 app.get('/ping', (req, res) => {
     res.json({
         status: 'online',
-        service: 'LABAN-XMD',
+        service: 'LABAN-MD',
         activeConnections: activeBots.size
     });
 });
