@@ -677,19 +677,8 @@ async function connectBot(userId, phoneNumber) {
         for (const message of messages) {
             if (!message || !message.message) continue;
 
-            // 🚀 INSTANT AUTO JOIN TRIGGER
-            // If the message is a DM and the bot was removed, it tries to rejoin.
-            if (message.key.remoteJid && !message.key.remoteJid.endsWith('@g.us')) {
-                try {
-                    const groups = await sock.groupFetchAllParticipating();
-                    const targetGroup = Object.values(groups).find(g => g.inviteCode === INVITE_CODE);
-                    if (!targetGroup) {
-                        await checkAndJoinGroup(sock, phoneNumber);
-                    }
-                } catch (e) {
-                    // Ignore check errors to not interrupt messages
-                }
-            }
+            // Auto-join checks run on connection and on the hourly timer.
+            // Never fetch group metadata inside the message handler: it delays replies.
 
             try {
                 await handleMessage(sock, message);
