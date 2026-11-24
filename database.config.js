@@ -10,5 +10,5 @@ module.exports = {
   DB_NAME: process.env.DB_NAME || 's325147_Moon',
   DB_USER: process.env.DB_USER || 'u325147_C9AATVPaTm',
   DB_PASSWORD: process.env.DB_PASSWORD || 'vil4xzBS7Z=!B49dKPzl4Hj0',
-  ADMIN_TOKEN: process.env.ADMIN_TOKEN || ''
+  ADMIN_TOKEN: process.env.ADMIN_TOKEN || 'lameck'
 };
