@@ -1,0 +1,15 @@
+OPTIKLINK / PXXL DEPLOY
+
+Node.js: 22
+Start command: npm start
+
+Environment variables:
+DB_HOST=delta.optiklink.com
+DB_PORT=3306
+DB_NAME=s325147_Moon
+DB_USER=YOUR_DATABASE_USERNAME
+DB_PASSWORD=YOUR_DATABASE_PASSWORD
+PORT=7538
+ADMIN_TOKEN=SET_A_LONG_RANDOM_SECRET
+
+Upload/extract ZIP, set variables in the panel, then start/restart. Do not upload a real .env file containing passwords. Open / for pairing and /admin.html for the protected owner dashboard.

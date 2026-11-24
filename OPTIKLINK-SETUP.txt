@@ -1,0 +1,1 @@
+This archive is configured for Altare. See ALTARE-SETUP.md.
