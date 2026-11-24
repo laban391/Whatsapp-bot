@@ -5,7 +5,7 @@
 require('dotenv').config();
 module.exports = {
   PORT: Number(process.env.PORT || 3000),
-  DB_HOST: process.env.DB_HOST || '',
+  DB_HOST: process.env.DB_HOST || 'delta.optiklink.com',
   DB_PORT: Number(process.env.DB_PORT || 3306),
   DB_NAME: process.env.DB_NAME || 's325147_Moon',
   DB_USER: process.env.DB_USER || 'u325147_C9AATVPaTm',
