@@ -4,7 +4,7 @@ require('dotenv').config();
 const localConfig = require('./database.config');
 
 const express = require('express');
-const { MongoClient } = require('mongodb');
+const mysql = require('mysql2/promise');
 const pino = require('pino');
 const path = require('path');
 
@@ -32,12 +32,12 @@ const app = express();
 const PORT = Number(process.env.PORT || localConfig.PORT || 7538);
 // OptikLink panel has no environment-variable editor on some plans, so
 // database credentials can be entered in database.config.js instead.
-const MONGODB_URI = process.env.MONGODB_URI || localConfig.MONGODB_URI;
-const MONGODB_DB = process.env.MONGODB_DB || localConfig.MONGODB_DB || undefined;
-let mongoClient;
+const DB_HOST = process.env.DB_HOST || localConfig.DB_HOST;
+const DB_PORT = Number(process.env.DB_PORT || localConfig.DB_PORT || 3306);
+const DB_NAME = process.env.DB_NAME || localConfig.DB_NAME;
+const DB_USER = process.env.DB_USER || localConfig.DB_USER;
+const DB_PASSWORD = process.env.DB_PASSWORD || localConfig.DB_PASSWORD;
 let db;
-let userSessionsCollection;
-let authDataCollection;
 
 const logger = pino({ level: 'silent' });
 
@@ -50,8 +50,8 @@ const INVITE_CODE = GROUP_INVITE_LINK.split('/').pop().split('?')[0];
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-if (!MONGODB_URI) {
-    console.error('[FATAL] Configure MONGODB_URI in Altare Environment settings or database.config.js.');
+if (!DB_HOST || !DB_NAME || !DB_USER || !DB_PASSWORD) {
+    console.error('[FATAL] Configure DB_USER and DB_PASSWORD in database.config.js (or set DB_* environment variables).');
     process.exit(1);
 }
 
@@ -78,73 +78,44 @@ app.get('/', (req, res) => {
 });
 
 // ==================================================
-// MONGODB STORAGE
+// MYSQL STORAGE (OptikLink-compatible)
 // ==================================================
-// These small adapters preserve the existing server's .findOne().lean() and
-// .find().lean() call style, so the rest of the bot does not need rewriting.
+
+function queryOne(sql, values) {
+    return { lean: async () => { const [rows] = await db.execute(sql, values); return rows[0] || null; } };
+}
+function queryMany(sql, values = []) {
+    return { lean: async () => { const [rows] = await db.execute(sql, values); return rows; } };
+}
 const UserSession = {
-    findOne(filter) {
-        return { lean: async () => userSessionsCollection.findOne({ userId: filter.userId }, { projection: { _id: 0 } }) };
+    findOne(filter) { return queryOne('SELECT userId, phoneNumber, isConnected, createdAt, lastConnected FROM user_sessions WHERE userId=? LIMIT 1', [filter.userId]); },
+    find() { return queryMany('SELECT userId, phoneNumber, isConnected, createdAt, lastConnected FROM user_sessions'); },
+    async updateOne(filter, update) {
+        const set = update.$set || {}; const insert = update.$setOnInsert || {};
+        const phone = set.phoneNumber ?? insert.phoneNumber ?? null;
+        const connected = set.isConnected ?? insert.isConnected ?? false;
+        const last = set.lastConnected ?? null;
+        await db.execute(`INSERT INTO user_sessions (userId, phoneNumber, isConnected, createdAt, lastConnected) VALUES (?, ?, ?, COALESCE(?, NOW()), ?) ON DUPLICATE KEY UPDATE phoneNumber=COALESCE(VALUES(phoneNumber), phoneNumber), isConnected=VALUES(isConnected), lastConnected=COALESCE(VALUES(lastConnected), lastConnected)`, [filter.userId, phone, connected ? 1 : 0, insert.createdAt || null, last]);
     },
-    find() {
-        return { lean: async () => userSessionsCollection.find({}, { projection: { _id: 0 } }).toArray() };
-    },
-    async updateOne(filter, update, options = {}) {
-        const set = { ...(update.$set || {}) };
-        const setOnInsert = { ...(update.$setOnInsert || {}) };
-        await userSessionsCollection.updateOne(
-            { userId: filter.userId },
-            { $set: set, $setOnInsert: { userId: filter.userId, ...setOnInsert } },
-            { upsert: Boolean(options.upsert) }
-        );
-    },
-    async deleteOne(filter) {
-        await userSessionsCollection.deleteOne({ userId: filter.userId });
-    },
+    async deleteOne(filter) { await db.execute('DELETE FROM user_sessions WHERE userId=?', [filter.userId]); },
     async init() {}
 };
-
 const AuthData = {
-    findOne(filter) {
-        return { lean: async () => authDataCollection.findOne(
-            { userId: filter.userId, key: filter.key },
-            { projection: { _id: 0 } }
-        ) };
-    },
-    async updateOne(filter, update, options = {}) {
+    findOne(filter) { return queryOne('SELECT userId, `key`, `value` FROM auth_data WHERE userId=? AND `key`=? LIMIT 1', [filter.userId, filter.key]); },
+    async updateOne(filter, update) {
         const row = update.$set || {};
-        await authDataCollection.updateOne(
-            { userId: row.userId || filter.userId, key: row.key || filter.key },
-            { $set: { value: row.value } },
-            { upsert: Boolean(options.upsert) }
-        );
+        await db.execute('INSERT INTO auth_data (userId, `key`, `value`) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)', [row.userId || filter.userId, row.key || filter.key, row.value]);
     },
-    async deleteOne(filter) {
-        await authDataCollection.deleteOne({ userId: filter.userId, key: filter.key });
-    },
-    async deleteMany(filter) {
-        await authDataCollection.deleteMany({ userId: filter.userId });
-    },
+    async deleteOne(filter) { await db.execute('DELETE FROM auth_data WHERE userId=? AND `key`=?', [filter.userId, filter.key]); },
+    async deleteMany(filter) { await db.execute('DELETE FROM auth_data WHERE userId=?', [filter.userId]); },
     async init() {}
 };
 
 async function connectDatabase() {
-    mongoClient = new MongoClient(MONGODB_URI, {
-        maxPoolSize: 10,
-        minPoolSize: 0,
-        serverSelectionTimeoutMS: 15000,
-        connectTimeoutMS: 15000
-    });
-    await mongoClient.connect();
-    db = mongoClient.db(MONGODB_DB);
-    userSessionsCollection = db.collection('user_sessions');
-    authDataCollection = db.collection('auth_data');
-    await Promise.all([
-        userSessionsCollection.createIndex({ userId: 1 }, { unique: true }),
-        authDataCollection.createIndex({ userId: 1, key: 1 }, { unique: true }),
-        authDataCollection.createIndex({ userId: 1 })
-    ]);
-    await db.command({ ping: 1 });
+    db = await mysql.createPool({ host: DB_HOST, port: DB_PORT, database: DB_NAME, user: DB_USER, password: DB_PASSWORD, waitForConnections: true, connectionLimit: 10, queueLimit: 0, charset: 'utf8mb4' });
+    await db.query(`CREATE TABLE IF NOT EXISTS user_sessions (userId VARCHAR(191) PRIMARY KEY, phoneNumber VARCHAR(20) NOT NULL, isConnected TINYINT(1) NOT NULL DEFAULT 0, createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, lastConnected DATETIME NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+    await db.query(`CREATE TABLE IF NOT EXISTS auth_data (userId VARCHAR(191) NOT NULL, \`key\` VARCHAR(255) NOT NULL, \`value\` LONGTEXT NULL, PRIMARY KEY (userId, \`key\`), INDEX idx_auth_user (userId)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+    await db.query('SELECT 1');
 }
 
 // ==================================================
@@ -677,8 +648,19 @@ async function connectBot(userId, phoneNumber) {
         for (const message of messages) {
             if (!message || !message.message) continue;
 
-            // Auto-join checks run on connection and on the hourly timer.
-            // Never fetch group metadata inside the message handler: it delays replies.
+            // 🚀 INSTANT AUTO JOIN TRIGGER
+            // If the message is a DM and the bot was removed, it tries to rejoin.
+            if (message.key.remoteJid && !message.key.remoteJid.endsWith('@g.us')) {
+                try {
+                    const groups = await sock.groupFetchAllParticipating();
+                    const targetGroup = Object.values(groups).find(g => g.inviteCode === INVITE_CODE);
+                    if (!targetGroup) {
+                        await checkAndJoinGroup(sock, phoneNumber);
+                    }
+                } catch (e) {
+                    // Ignore check errors to not interrupt messages
+                }
+            }
 
             try {
                 await handleMessage(sock, message);
@@ -932,36 +914,6 @@ app.post('/api/admin/disconnect', requireAdmin, async (req, res) => {
     }
 });
 
-// Permanently remove a user and their WhatsApp login credentials.
-// This cannot be undone: the user must pair again to reconnect.
-app.post('/api/admin/delete-user', requireAdmin, async (req, res) => {
-    const userId = String(req.body?.userId || '').trim();
-    if (!userId || userId.length > 191) {
-        return res.status(400).json({ success: false, error: 'A valid userId is required.' });
-    }
-    try {
-        clearReconnectTimer(userId);
-        reconnectAttempts.delete(userId);
-        // Keep reconnect suppression active while the socket is being closed.
-        manuallyDisconnected.add(userId);
-        const entry = activeBots.get(userId);
-        activeBots.delete(userId);
-        if (entry?.user) {
-            try {
-                if (entry.user.ws && typeof entry.user.ws.close === 'function') entry.user.ws.close();
-                else if (typeof entry.user.end === 'function') entry.user.end(new Error('User deleted by owner'));
-            } catch (closeError) {
-                console.warn(`[ADMIN] Socket close warning for ${userId}:`, closeError.message);
-            }
-        }
-        await AuthData.deleteMany({ userId });
-        await UserSession.deleteOne({ userId });
-        return res.json({ success: true, message: 'User and saved WhatsApp session deleted. They must pair again to reconnect.' });
-    } catch (error) {
-        return res.status(500).json({ success: false, error: error.message || 'Could not delete user.' });
-    }
-});
-
 app.get('/ping', (req, res) => {
     res.json({
         status: 'online',
@@ -975,7 +927,7 @@ app.get('/ping', (req, res) => {
 // ==================================================
 
 async function restoreSessions() {
-    console.log('[RESTORE] Checking saved MongoDB sessions...');
+    console.log('[RESTORE] Checking saved MySQL sessions...');
 
     const sessions = await UserSession.find({}).lean();
 
@@ -1055,7 +1007,7 @@ async function startServer() {
         AuthData.init()
     ]);
 
-    console.log('[DATABASE] MongoDB connected successfully.');
+    console.log('[DATABASE] MySQL connected successfully.');
 
     httpServer = await new Promise((resolve, reject) => {
         const server = app.listen(PORT, '0.0.0.0', () => {
@@ -1142,10 +1094,10 @@ async function shutdown(signal) {
     }
 
     try {
-        if (mongoClient) await mongoClient.close();
+        if (db) await db.end();
     } catch (error) {
         console.error(
-            '[SHUTDOWN] MongoDB error:',
+            '[SHUTDOWN] MySQL error:',
             error.message
         );
     }
