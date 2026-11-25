@@ -32,7 +32,7 @@ const app = express();
 const PORT = Number(process.env.PORT || localConfig.PORT || 7538);
 // OptikLink panel has no environment-variable editor on some plans, so
 // database credentials can be entered in database.config.js instead.
-const MONGODB_URI = process.env.MONGODB_URI || localConfig.MONGODB_URI;
+const MONGODB_URI = process.env.MONGODB_URI || process.env.MONGO_URI || localConfig.MONGODB_URI;
 const MONGODB_DB = process.env.MONGODB_DB || localConfig.MONGODB_DB || undefined;
 let mongoClient;
 let db;
@@ -54,7 +54,7 @@ app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 if (!MONGODB_URI) {
-    console.error('[FATAL] Configure MONGODB_URI in Altare Environment settings or database.config.js.');
+    console.error('[FATAL] Configure MONGODB_URI (or MONGO_URI) in Altare Environment settings or database.config.js.');
     process.exit(1);
 }
 
@@ -94,10 +94,23 @@ const UserSession = {
     },
     async updateOne(filter, update, options = {}) {
         const set = { ...(update.$set || {}) };
-        const setOnInsert = { ...(update.$setOnInsert || {}) };
+        const requestedInsertFields = { ...(update.$setOnInsert || {}) };
+        const setOnInsert = {
+            userId: filter.userId,
+            createdAt: requestedInsertFields.createdAt || new Date(),
+            ...requestedInsertFields
+        };
+
+        // MongoDB rejects an update if the same path appears in both $set
+        // and $setOnInsert. Pairing sets phoneNumber while older callers may
+        // also provide it as an insert default, so remove overlapping paths.
+        for (const field of Object.keys(set)) {
+            delete setOnInsert[field];
+        }
+
         await userSessionsCollection.updateOne(
             { userId: filter.userId },
-            { $set: set, $setOnInsert: { userId: filter.userId, ...setOnInsert } },
+            { $set: set, $setOnInsert: setOnInsert },
             { upsert: Boolean(options.upsert) }
         );
     },
@@ -152,7 +165,26 @@ async function connectDatabase() {
         groupTimersCollection.createIndex({ active: 1, nextCloseAt: 1 })
     ]);
     await db.command({ ping: 1 });
+    console.log(`[DATABASE] MongoDB connected. Database: ${db.databaseName}`);
+    console.log('[DATABASE] Collections ready: user_sessions, auth_data, group_timers');
 }
+
+// Safe diagnostic endpoint: confirms the live process is connected without
+// exposing the MongoDB URI or credentials.
+app.get('/health/db', async (req, res) => {
+    try {
+        if (!db) throw new Error('Database is not connected');
+        await db.command({ ping: 1 });
+        const collections = await db.listCollections({}, { nameOnly: true }).toArray();
+        return res.json({
+            ok: true,
+            database: db.databaseName,
+            collections: collections.map(collection => collection.name)
+        });
+    } catch (error) {
+        return res.status(503).json({ ok: false, error: error.message });
+    }
+});
 
 // ==================================================
 // ACTIVE BOT STORAGE
@@ -164,15 +196,6 @@ const manuallyDisconnected = new Set();
 const reconnectTimers = new Map();
 const reconnectAttempts = new Map();
 const pairingLocks = new Set();
-// Invalidates every pending auth write/socket callback for a deleted session.
-const sessionEpochs = new Map();
-function getSessionEpoch(userId) {
-    if (!sessionEpochs.has(userId)) sessionEpochs.set(userId, 0);
-    return sessionEpochs.get(userId);
-}
-function invalidateSessionEpoch(userId) {
-    sessionEpochs.set(userId, getSessionEpoch(userId) + 1);
-}
 
 let httpServer = null;
 let shuttingDown = false;
@@ -225,9 +248,8 @@ function clearReconnectTimer(userId) {
 // MONGODB AUTHENTICATION
 // ==================================================
 
-async function useMongoAuthState(userId, epoch) {
+async function useMongoAuthState(userId) {
     const CREDS_KEY = '__creds__';
-    const isCurrent = () => getSessionEpoch(userId) === epoch;
 
     async function readValue(key) {
         const document = await AuthData.findOne({
@@ -246,7 +268,6 @@ async function useMongoAuthState(userId, epoch) {
     }
 
     async function writeValue(key, value) {
-        if (!isCurrent()) return;
         if (value === null || value === undefined) {
             await AuthData.deleteOne({ userId, key });
             return;
@@ -529,11 +550,7 @@ async function connectBot(userId, phoneNumber) {
 
     clearReconnectTimer(userId);
 
-    const epoch = getSessionEpoch(userId);
-    const auth = await useMongoAuthState(userId, epoch);
-    if (getSessionEpoch(userId) !== epoch) {
-        throw new Error('This WhatsApp session was deleted while connecting. Please start pairing again.');
-    }
+    const auth = await useMongoAuthState(userId);
 
     const latest = await fetchLatestBaileysVersion();
     const version = latest.version;
@@ -577,7 +594,6 @@ async function connectBot(userId, phoneNumber) {
         phoneNumber,
         auth,
         authState: auth.state,
-        sessionEpoch: epoch,
         connectionState: 'initializing'
     };
 
@@ -585,7 +601,6 @@ async function connectBot(userId, phoneNumber) {
 
     sock.ev.on('creds.update', async () => {
         try {
-            if (getSessionEpoch(userId) !== epoch || activeBots.get(userId)?.user !== sock) return;
             await auth.saveCreds();
         } catch (error) {
             console.error(
@@ -597,7 +612,6 @@ async function connectBot(userId, phoneNumber) {
 
     // CONNECTION UPDATES
     sock.ev.on('connection.update', async update => {
-        if (getSessionEpoch(userId) !== epoch || activeBots.get(userId)?.user !== sock) return;
         const {
             connection,
             lastDisconnect
@@ -977,10 +991,8 @@ app.post('/api/admin/delete-user', requireAdmin, async (req, res) => {
         return res.status(400).json({ success: false, error: 'A valid userId is required.' });
     }
     try {
-        invalidateSessionEpoch(userId);
         clearReconnectTimer(userId);
         reconnectAttempts.delete(userId);
-        pairingLocks.delete(userId);
         // Keep reconnect suppression active while the socket is being closed.
         manuallyDisconnected.add(userId);
         const entry = activeBots.get(userId);
