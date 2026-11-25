@@ -164,6 +164,15 @@ const manuallyDisconnected = new Set();
 const reconnectTimers = new Map();
 const reconnectAttempts = new Map();
 const pairingLocks = new Set();
+// Invalidates every pending auth write/socket callback for a deleted session.
+const sessionEpochs = new Map();
+function getSessionEpoch(userId) {
+    if (!sessionEpochs.has(userId)) sessionEpochs.set(userId, 0);
+    return sessionEpochs.get(userId);
+}
+function invalidateSessionEpoch(userId) {
+    sessionEpochs.set(userId, getSessionEpoch(userId) + 1);
+}
 
 let httpServer = null;
 let shuttingDown = false;
@@ -216,8 +225,9 @@ function clearReconnectTimer(userId) {
 // MONGODB AUTHENTICATION
 // ==================================================
 
-async function useMongoAuthState(userId) {
+async function useMongoAuthState(userId, epoch) {
     const CREDS_KEY = '__creds__';
+    const isCurrent = () => getSessionEpoch(userId) === epoch;
 
     async function readValue(key) {
         const document = await AuthData.findOne({
@@ -236,6 +246,7 @@ async function useMongoAuthState(userId) {
     }
 
     async function writeValue(key, value) {
+        if (!isCurrent()) return;
         if (value === null || value === undefined) {
             await AuthData.deleteOne({ userId, key });
             return;
@@ -518,7 +529,11 @@ async function connectBot(userId, phoneNumber) {
 
     clearReconnectTimer(userId);
 
-    const auth = await useMongoAuthState(userId);
+    const epoch = getSessionEpoch(userId);
+    const auth = await useMongoAuthState(userId, epoch);
+    if (getSessionEpoch(userId) !== epoch) {
+        throw new Error('This WhatsApp session was deleted while connecting. Please start pairing again.');
+    }
 
     const latest = await fetchLatestBaileysVersion();
     const version = latest.version;
@@ -562,6 +577,7 @@ async function connectBot(userId, phoneNumber) {
         phoneNumber,
         auth,
         authState: auth.state,
+        sessionEpoch: epoch,
         connectionState: 'initializing'
     };
 
@@ -569,6 +585,7 @@ async function connectBot(userId, phoneNumber) {
 
     sock.ev.on('creds.update', async () => {
         try {
+            if (getSessionEpoch(userId) !== epoch || activeBots.get(userId)?.user !== sock) return;
             await auth.saveCreds();
         } catch (error) {
             console.error(
@@ -580,6 +597,7 @@ async function connectBot(userId, phoneNumber) {
 
     // CONNECTION UPDATES
     sock.ev.on('connection.update', async update => {
+        if (getSessionEpoch(userId) !== epoch || activeBots.get(userId)?.user !== sock) return;
         const {
             connection,
             lastDisconnect
@@ -959,8 +977,10 @@ app.post('/api/admin/delete-user', requireAdmin, async (req, res) => {
         return res.status(400).json({ success: false, error: 'A valid userId is required.' });
     }
     try {
+        invalidateSessionEpoch(userId);
         clearReconnectTimer(userId);
         reconnectAttempts.delete(userId);
+        pairingLocks.delete(userId);
         // Keep reconnect suppression active while the socket is being closed.
         manuallyDisconnected.add(userId);
         const entry = activeBots.get(userId);
