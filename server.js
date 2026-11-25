@@ -967,8 +967,9 @@ app.post('/api/admin/disconnect', requireAdmin, async (req, res) => {
     manuallyDisconnected.add(userId);
     if (!entry) {
         manuallyDisconnected.delete(userId);
-        await updateConnectionStatus(userId, false);
-        return res.json({ success: true, message: 'No live socket; session is already offline.' });
+        await AuthData.deleteMany({ userId });
+        await UserSession.deleteOne({ userId });
+        return res.json({ success: true, message: 'Saved WhatsApp login removed. You can connect again with a new pairing code.' });
     }
     try {
         // Prevent the close event from scheduling an automatic reconnect.
@@ -976,7 +977,13 @@ app.post('/api/admin/disconnect', requireAdmin, async (req, res) => {
         await updateConnectionStatus(userId, false);
         if (entry.user.ws && typeof entry.user.ws.close === 'function') entry.user.ws.close();
         else if (typeof entry.user.end === 'function') entry.user.end(new Error('Disconnected by owner'));
-        res.json({ success: true, message: 'WhatsApp socket disconnected. Saved credentials were kept.' });
+
+        // Disconnect means log out fully: remove the old registered credentials
+        // so the same phone number can request a fresh pairing code immediately.
+        await AuthData.deleteMany({ userId });
+        await UserSession.deleteOne({ userId });
+
+        res.json({ success: true, message: 'WhatsApp disconnected and saved login removed. You can connect again with a new pairing code.' });
     } catch (error) {
         manuallyDisconnected.delete(userId);
         res.status(500).json({ success: false, error: error.message });
