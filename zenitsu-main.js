@@ -151,6 +151,7 @@ const { pmblockerCommand, readState: readPmBlockerState } = require('./commands/
 const settingsCommand = require('./commands/settings');
 const autorecordtypeFeature = require('./commands/autorecordtype');
 const soraCommand = require('./commands/sora');
+const { grouptimerCommand } = require('./commands/grouptimer');
 
 // Global settings
 global.packname = settings.packname;
@@ -332,7 +333,7 @@ async function handleMessages(sock, messageUpdate, printLog) {
         }
 
         // List of admin commands
-        const adminCommands = ['.mute', '.unmute', '.ban', '.unban', '.promote', '.demote', '.kick', '.tagall', '.tagnotadmin', '.hidetag', '.antilink', '.antitag', '.antibot', '.nobot', '.setgdesc', '.setgname', '.setgpp', '.groupstatus', '.togstatus', '.swgc', '.gstatus', '.gs'];
+        const adminCommands = ['.mute', '.unmute', '.ban', '.unban', '.promote', '.demote', '.kick', '.tagall', '.tagnotadmin', '.hidetag', '.antilink', '.antitag', '.antibot', '.nobot', '.setgdesc', '.setgname', '.setgpp', '.groupstatus', '.togstatus', '.swgc', '.gstatus', '.gs', '.grouptimer'];
         const isAdminCommand = adminCommands.some(cmd => userMessage.startsWith(cmd));
 
         // List of owner commands
@@ -430,6 +431,10 @@ async function handleMessages(sock, messageUpdate, printLog) {
                     }
                 }
                 await unbanCommand(sock, chatId, message);
+                break;
+            case userMessage.startsWith('.grouptimer'):
+                await grouptimerCommand(sock, chatId, senderId, userMessage.split(/\s+/).slice(1), message);
+                commandExecuted = true;
                 break;
             case userMessage === '.help' || userMessage === '.menu' || userMessage === '.bot' || userMessage === '.list':
                 await helpCommand(sock, chatId, message, global.channelLink);
