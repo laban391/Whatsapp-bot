@@ -83,6 +83,8 @@ ${readMore}
 │ ➧ .setgname
 │ ➧ .setgpp
 │ ➧ .groupstatus
+│ ➧ .grouptimer 08:00 20:00
+│ ➧ .grouptimer off
 ╰━━━━━━━━━━━━━━
 
 ${readMore}
