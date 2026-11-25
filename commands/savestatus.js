@@ -58,6 +58,37 @@ function ownerJid(sock) {
   return num.length >= 8 ? `${num}@s.whatsapp.net` : null;
 }
 
+// WhatsApp may deliver the account's own status with fromMe=false. Compare
+// every available account identity (phone JID and LID) with the status author.
+function identityOf(value) {
+  if (!value) return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+  if (raw.includes('@lid')) return `lid:${raw.split(':')[0].split('@')[0]}`;
+  if (raw.includes('@s.whatsapp.net') || /^\+?[0-9][0-9(). -]*$/.test(raw)) {
+    const number = raw.split(':')[0].split('@')[0].replace(/\D/g, '');
+    return number.length >= 8 ? `phone:${number}` : null;
+  }
+  return null;
+}
+
+function isOwnStatus(sock, msg) {
+  const me = sock?.user || sock?.authState?.creds?.me || {};
+  const ownValues = [
+    sock?.__phoneNumber, me?.id, me?.lid,
+    sock?.authState?.creds?.me?.id, sock?.authState?.creds?.me?.lid,
+    settings.ownerNumber,
+  ];
+  const own = new Set(ownValues.map(identityOf).filter(Boolean));
+  if (!own.size) return false;
+  const key = msg?.key || msg || {};
+  const authors = [key.participant, key.participantAlt, key.remoteJidAlt];
+  return authors.some((value) => {
+    const identity = identityOf(value);
+    return identity ? own.has(identity) : false;
+  });
+}
+
 function unwrap(message) {
   let current = message;
   for (let i = 0; i < 5 && current; i++) {
@@ -193,8 +224,8 @@ function statusHeader(candidates) {
   return { text: `💾 *Saved Status* from ${who.text}`, mentions: who.mentions };
 }
 
-function remember(msg) {
-  if (!msg?.key?.id || msg.key.fromMe) return;
+function remember(sock, msg) {
+  if (!msg?.key?.id || msg.key.fromMe || isOwnStatus(sock, msg)) return;
   if (msg.key.remoteJid !== 'status@broadcast') return;
   recent.set(msg.key.id, { msg, at: Date.now() });
   while (recent.size > RECENT_MAX) {
@@ -342,9 +373,9 @@ async function autoSave(sock, msg) {
   // Only real status messages — ignore reaction / empty updates
   if (!msg?.key?.id || !msg.message) return;
   if (msg.key.remoteJid !== 'status@broadcast') return;
-  if (msg.key.fromMe) return;
+  if (msg.key.fromMe || isOwnStatus(sock, msg)) return;
 
-  remember(msg);
+  remember(sock, msg);
   if (!isEnabled(sock)) return;
 
   if (savedIds.has(msg.key.id)) return;
@@ -421,7 +452,11 @@ async function savestatusCommand(sock, chatId, message, senderId) {
       id: stanzaId || cached?.key?.id,
       participant: ctx?.participant || cached?.key?.participant,
       participantAlt: ctx?.participantAlt || cached?.key?.participantAlt,
+      remoteJidAlt: cached?.key?.remoteJidAlt,
     };
+    if (isOwnStatus(sock, { key: statusKey })) {
+      return reply('❌ Your own status cannot be saved by this command.');
+    }
     if (statusKey.id) {
       await reply('⏳ Fetching status media…');
       await prefetchStatus(sock, statusKey, 2500);
@@ -482,3 +517,4 @@ module.exports = savestatusCommand;
 module.exports.autoSave = autoSave;
 module.exports.isEnabled = isEnabled;
 module.exports.setEnabled = setEnabled;
+module.exports.isOwnStatus = isOwnStatus;
