@@ -38,6 +38,9 @@ let mongoClient;
 let db;
 let userSessionsCollection;
 let authDataCollection;
+let groupTimersCollection;
+let groupTimerInterval = null;
+let groupTimerTickRunning = false;
 
 const logger = pino({ level: 'silent' });
 
@@ -139,10 +142,14 @@ async function connectDatabase() {
     db = mongoClient.db(MONGODB_DB);
     userSessionsCollection = db.collection('user_sessions');
     authDataCollection = db.collection('auth_data');
+    groupTimersCollection = db.collection('group_timers');
     await Promise.all([
         userSessionsCollection.createIndex({ userId: 1 }, { unique: true }),
         authDataCollection.createIndex({ userId: 1, key: 1 }, { unique: true }),
-        authDataCollection.createIndex({ userId: 1 })
+        authDataCollection.createIndex({ userId: 1 }),
+        groupTimersCollection.createIndex({ userId: 1, groupId: 1 }, { unique: true }),
+        groupTimersCollection.createIndex({ active: 1, nextOpenAt: 1 }),
+        groupTimersCollection.createIndex({ active: 1, nextCloseAt: 1 })
     ]);
     await db.command({ ping: 1 });
 }
@@ -548,6 +555,7 @@ async function connectBot(userId, phoneNumber) {
 
     sock.__tenantId = userId;
     sock.__phoneNumber = phoneNumber;
+    sock.groupTimersCollection = groupTimersCollection;
 
     const entry = {
         user: sock,
@@ -1055,6 +1063,80 @@ async function restoreSessions() {
 }
 
 // ==================================================
+// DAILY GROUP OPEN/CLOSE SCHEDULER (Africa/Nairobi)
+// ==================================================
+
+async function runGroupTimerTick() {
+    if (groupTimerTickRunning || !groupTimersCollection) return;
+    groupTimerTickRunning = true;
+    try {
+        const now = new Date();
+        const dueTimers = await groupTimersCollection.find({
+            active: true,
+            $or: [
+                { nextOpenAt: { $lte: now } },
+                { nextCloseAt: { $lte: now } }
+            ]
+        }).limit(100).toArray();
+
+        const { nextOccurrence, parseTime } = require('./commands/grouptimer');
+        const isAdmin = require('./lib/isAdmin');
+
+        for (const timer of dueTimers) {
+            const openDue = timer.nextOpenAt && timer.nextOpenAt <= now;
+            const closeDue = timer.nextCloseAt && timer.nextCloseAt <= now;
+            if (!openDue && !closeDue) continue;
+            const action = openDue && closeDue
+                ? (timer.nextOpenAt <= timer.nextCloseAt ? 'open' : 'close')
+                : (openDue ? 'open' : 'close');
+            const timeValue = action === 'open' ? timer.openTime : timer.closeTime;
+            const nextAt = nextOccurrence(parseTime(timeValue), now);
+            const field = action === 'open' ? 'nextOpenAt' : 'nextCloseAt';
+            const entry = activeBots.get(timer.userId);
+            if (!entry || entry.connectionState !== 'open') continue;
+
+            try {
+                const permission = await isAdmin(entry.user, timer.groupId, entry.user.user?.id || '');
+                if (!permission.isBotAdmin) {
+                    console.warn(`[GROUP TIMER] Bot is no longer admin in ${timer.groupId}; ${action} skipped.`);
+                    await groupTimersCollection.updateOne(
+                        { _id: timer._id, [field]: timer[field] },
+                        { $set: { [field]: nextAt, lastError: 'Bot is not a group admin', updatedAt: now } }
+                    );
+                    continue;
+                }
+
+                await entry.user.groupSettingUpdate(
+                    timer.groupId,
+                    action === 'open' ? 'not_announcement' : 'announcement'
+                );
+                await entry.user.sendMessage(timer.groupId, {
+                    text: action === 'open'
+                        ? '🔓 The group is now open. All members can send messages.'
+                        : '🔒 The group is now closed. Only admins can send messages.'
+                });
+                await groupTimersCollection.updateOne(
+                    { _id: timer._id, [field]: timer[field] },
+                    { $set: { [field]: nextAt, lastRunAt: new Date(), lastAction: action, lastError: null, updatedAt: new Date() } }
+                );
+                console.log(`[GROUP TIMER] ${action} completed for ${timer.groupId} (${timer.userId}).`);
+            } catch (error) {
+                console.error(`[GROUP TIMER] ${action} failed for ${timer.groupId}:`, error.message || error);
+                // Advance to tomorrow to avoid retrying a failing action every 15 seconds.
+                await groupTimersCollection.updateOne(
+                    { _id: timer._id, [field]: timer[field] },
+                    { $set: { [field]: nextAt, lastError: String(error.message || error), updatedAt: new Date() } }
+                );
+            }
+        }
+    } catch (error) {
+        console.error('[GROUP TIMER] Scheduler error:', error.message || error);
+    } finally {
+        groupTimerTickRunning = false;
+    }
+}
+
+// ==================================================
 // START SERVER
 // ==================================================
 
@@ -1080,6 +1162,10 @@ async function startServer() {
     });
 
     await restoreSessions();
+
+    if (groupTimerInterval) clearInterval(groupTimerInterval);
+    await runGroupTimerTick();
+    groupTimerInterval = setInterval(runGroupTimerTick, 15 * 1000);
 
     // 🚀 START THE 1-HOUR AUTO-JOIN TIMER FOR ALL ACTIVE BOTS
     if (autoJoinInterval) clearInterval(autoJoinInterval);
@@ -1110,6 +1196,7 @@ async function shutdown(signal) {
     );
 
     if (autoJoinInterval) clearInterval(autoJoinInterval);
+    if (groupTimerInterval) clearInterval(groupTimerInterval);
 
     for (const timer of reconnectTimers.values()) {
         clearTimeout(timer);
