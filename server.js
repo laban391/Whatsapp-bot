@@ -139,7 +139,7 @@ const AuthData = {
         await authDataCollection.deleteOne({ userId: filter.userId, key: filter.key });
     },
     async deleteMany(filter) {
-        await authDataCollection.deleteMany({ userId: filter.userId });
+        return authDataCollection.deleteMany({ userId: filter.userId });
     },
     async init() {}
 };
@@ -250,6 +250,10 @@ function clearReconnectTimer(userId) {
 
 async function useMongoAuthState(userId) {
     const CREDS_KEY = '__creds__';
+    // Serialize auth writes so logout can block new writes and wait for any
+    // already-started MongoDB writes before deleting the saved credentials.
+    let writesBlocked = false;
+    let writeQueue = Promise.resolve();
 
     async function readValue(key) {
         const document = await AuthData.findOne({
@@ -267,28 +271,47 @@ async function useMongoAuthState(userId) {
         );
     }
 
-    async function writeValue(key, value) {
-        if (value === null || value === undefined) {
-            await AuthData.deleteOne({ userId, key });
-            return;
-        }
+    function writeValue(key, value) {
+        if (writesBlocked) return Promise.resolve();
 
-        const serialized = JSON.stringify(
-            value,
-            BufferJSON.replacer
-        );
+        const operation = async () => {
+            // Re-check inside the queue: logout may have blocked writes while
+            // this operation was waiting behind an earlier MongoDB write.
+            if (writesBlocked) return;
 
-        await AuthData.updateOne(
-            { userId, key },
-            {
-                $set: {
-                    userId,
-                    key,
-                    value: serialized
-                }
-            },
-            { upsert: true }
-        );
+            if (value === null || value === undefined) {
+                await AuthData.deleteOne({ userId, key });
+                return;
+            }
+
+            const serialized = JSON.stringify(
+                value,
+                BufferJSON.replacer
+            );
+
+            await AuthData.updateOne(
+                { userId, key },
+                {
+                    $set: {
+                        userId,
+                        key,
+                        value: serialized
+                    }
+                },
+                { upsert: true }
+            );
+        };
+
+        const pending = writeQueue.then(operation);
+        writeQueue = pending.catch(error => {
+            console.error(`[AUTH] MongoDB write failed for ${userId}:`, error.message);
+        });
+        return pending;
+    }
+
+    async function blockWritesAndFlush() {
+        writesBlocked = true;
+        await writeQueue;
     }
 
     const creds =
@@ -337,6 +360,7 @@ async function useMongoAuthState(userId) {
         },
 
         async clear() {
+            if (writesBlocked) return;
             await AuthData.deleteMany({ userId });
         }
     };
@@ -349,6 +373,11 @@ async function useMongoAuthState(userId) {
 
         async saveCreds() {
             await writeValue(CREDS_KEY, creds);
+        },
+
+        // Called by the admin logout flow before closing the socket.
+        async blockWritesAndFlush() {
+            await blockWritesAndFlush();
         }
     };
 }
@@ -915,11 +944,29 @@ async function handlePairRequest(req, res) {
 
         if (entry) {
             try {
+                if (entry.auth?.blockWritesAndFlush) {
+                    await entry.auth.blockWritesAndFlush();
+                }
+            } catch (flushError) {
+                console.error(`[PAIRING] Could not flush auth writes for ${phoneNumber}:`, flushError.message);
+            }
+
+            try {
                 entry.user.end(undefined);
             } catch {}
 
             if (activeBots.get(userId)?.user === entry.user) {
                 activeBots.delete(userId);
+            }
+
+            // A failed pairing request must not leave half-created credentials
+            // that make the next attempt look like an already-registered login.
+            try {
+                await AuthData.deleteMany({ userId });
+                await UserSession.deleteOne({ userId });
+                console.log(`[PAIRING] Removed incomplete session data for ${phoneNumber}.`);
+            } catch (cleanupError) {
+                console.error(`[PAIRING] Cleanup failed for ${phoneNumber}:`, cleanupError.message);
             }
         }
 
@@ -960,33 +1007,55 @@ app.get('/api/admin/sessions', requireAdmin, async (req, res) => {
     } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 app.post('/api/admin/disconnect', requireAdmin, async (req, res) => {
-    const userId = String(req.body?.userId || '');
+    const userId = String(req.body?.userId || '').trim();
+    if (!userId) {
+        return res.status(400).json({ success: false, error: 'A valid userId is required.' });
+    }
+
     const entry = activeBots.get(userId);
     clearReconnectTimer(userId);
     reconnectAttempts.delete(userId);
     manuallyDisconnected.add(userId);
-    if (!entry) {
-        manuallyDisconnected.delete(userId);
-        await AuthData.deleteMany({ userId });
-        await UserSession.deleteOne({ userId });
-        return res.json({ success: true, message: 'Saved WhatsApp login removed. You can connect again with a new pairing code.' });
-    }
+
     try {
-        // Prevent the close event from scheduling an automatic reconnect.
-        activeBots.delete(userId);
-        await updateConnectionStatus(userId, false);
-        if (entry.user.ws && typeof entry.user.ws.close === 'function') entry.user.ws.close();
-        else if (typeof entry.user.end === 'function') entry.user.end(new Error('Disconnected by owner'));
+        // Stop this socket from writing credentials back to MongoDB. Wait for
+        // all writes already in progress before deleting the auth documents.
+        if (entry?.auth?.blockWritesAndFlush) {
+            await entry.auth.blockWritesAndFlush();
+        }
 
-        // Disconnect means log out fully: remove the old registered credentials
-        // so the same phone number can request a fresh pairing code immediately.
-        await AuthData.deleteMany({ userId });
-        await UserSession.deleteOne({ userId });
+        if (entry) {
+            activeBots.delete(userId);
 
-        res.json({ success: true, message: 'WhatsApp disconnected and saved login removed. You can connect again with a new pairing code.' });
+            try {
+                if (entry.user.ws && typeof entry.user.ws.close === 'function') {
+                    entry.user.ws.close();
+                } else if (typeof entry.user.end === 'function') {
+                    entry.user.end(new Error('Disconnected by owner'));
+                }
+            } catch (closeError) {
+                console.warn(`[ADMIN] Socket close warning for ${userId}:`, closeError.message);
+            }
+        }
+
+        const authDelete = await AuthData.deleteMany({ userId });
+        const sessionDelete = await UserSession.deleteOne({ userId });
+        manuallyDisconnected.delete(userId);
+
+        console.log(
+            `[ADMIN] Logout cleanup for ${userId}: deleted ${authDelete?.deletedCount ?? 0} auth record(s), session ${sessionDelete?.deletedCount ? 'removed' : 'not found'}.`
+        );
+
+        return res.json({
+            success: true,
+            message: 'WhatsApp disconnected and saved login removed. You can connect again with a new pairing code.',
+            deletedAuthRecords: authDelete?.deletedCount ?? 0,
+            deletedSession: Boolean(sessionDelete?.deletedCount)
+        });
     } catch (error) {
         manuallyDisconnected.delete(userId);
-        res.status(500).json({ success: false, error: error.message });
+        console.error(`[ADMIN] Disconnect cleanup failed for ${userId}:`, error.stack || error.message);
+        return res.status(500).json({ success: false, error: error.message || 'Could not remove the saved WhatsApp login.' });
     }
 });
 
