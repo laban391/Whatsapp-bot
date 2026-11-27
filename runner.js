@@ -29,8 +29,8 @@ function startBot() {
         console.log(
             `[SUPERVISOR] Bot exited (code: ${code}, signal: ${signal}).`
         );
-        console.log('[SUPERVISOR] Restarting in 3 seconds...');
 
+        console.log('[SUPERVISOR] Restarting in 3 seconds...');
         setTimeout(startBot, 3000);
     });
 }
