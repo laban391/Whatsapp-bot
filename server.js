@@ -139,7 +139,7 @@ const AuthData = {
         await authDataCollection.deleteOne({ userId: filter.userId, key: filter.key });
     },
     async deleteMany(filter) {
-        return authDataCollection.deleteMany({ userId: filter.userId });
+        await authDataCollection.deleteMany({ userId: filter.userId });
     },
     async init() {}
 };
@@ -200,6 +200,9 @@ const pairingLocks = new Set();
 let httpServer = null;
 let shuttingDown = false;
 let autoJoinInterval = null; // 👈 Store the 1-hour timer
+let scheduledRestartTimeout = null;
+const AUTO_RESTART_ENABLED = String(process.env.AUTO_RESTART_ENABLED ?? 'true').toLowerCase() !== 'false';
+const AUTO_RESTART_MINUTES = Math.max(1, Number(process.env.AUTO_RESTART_MINUTES || 5));
 
 // ==================================================
 // GENERAL HELPERS
@@ -250,10 +253,6 @@ function clearReconnectTimer(userId) {
 
 async function useMongoAuthState(userId) {
     const CREDS_KEY = '__creds__';
-    // Serialize auth writes so logout can block new writes and wait for any
-    // already-started MongoDB writes before deleting the saved credentials.
-    let writesBlocked = false;
-    let writeQueue = Promise.resolve();
 
     async function readValue(key) {
         const document = await AuthData.findOne({
@@ -271,47 +270,28 @@ async function useMongoAuthState(userId) {
         );
     }
 
-    function writeValue(key, value) {
-        if (writesBlocked) return Promise.resolve();
+    async function writeValue(key, value) {
+        if (value === null || value === undefined) {
+            await AuthData.deleteOne({ userId, key });
+            return;
+        }
 
-        const operation = async () => {
-            // Re-check inside the queue: logout may have blocked writes while
-            // this operation was waiting behind an earlier MongoDB write.
-            if (writesBlocked) return;
+        const serialized = JSON.stringify(
+            value,
+            BufferJSON.replacer
+        );
 
-            if (value === null || value === undefined) {
-                await AuthData.deleteOne({ userId, key });
-                return;
-            }
-
-            const serialized = JSON.stringify(
-                value,
-                BufferJSON.replacer
-            );
-
-            await AuthData.updateOne(
-                { userId, key },
-                {
-                    $set: {
-                        userId,
-                        key,
-                        value: serialized
-                    }
-                },
-                { upsert: true }
-            );
-        };
-
-        const pending = writeQueue.then(operation);
-        writeQueue = pending.catch(error => {
-            console.error(`[AUTH] MongoDB write failed for ${userId}:`, error.message);
-        });
-        return pending;
-    }
-
-    async function blockWritesAndFlush() {
-        writesBlocked = true;
-        await writeQueue;
+        await AuthData.updateOne(
+            { userId, key },
+            {
+                $set: {
+                    userId,
+                    key,
+                    value: serialized
+                }
+            },
+            { upsert: true }
+        );
     }
 
     const creds =
@@ -360,7 +340,6 @@ async function useMongoAuthState(userId) {
         },
 
         async clear() {
-            if (writesBlocked) return;
             await AuthData.deleteMany({ userId });
         }
     };
@@ -373,11 +352,6 @@ async function useMongoAuthState(userId) {
 
         async saveCreds() {
             await writeValue(CREDS_KEY, creds);
-        },
-
-        // Called by the admin logout flow before closing the socket.
-        async blockWritesAndFlush() {
-            await blockWritesAndFlush();
         }
     };
 }
@@ -944,29 +918,11 @@ async function handlePairRequest(req, res) {
 
         if (entry) {
             try {
-                if (entry.auth?.blockWritesAndFlush) {
-                    await entry.auth.blockWritesAndFlush();
-                }
-            } catch (flushError) {
-                console.error(`[PAIRING] Could not flush auth writes for ${phoneNumber}:`, flushError.message);
-            }
-
-            try {
                 entry.user.end(undefined);
             } catch {}
 
             if (activeBots.get(userId)?.user === entry.user) {
                 activeBots.delete(userId);
-            }
-
-            // A failed pairing request must not leave half-created credentials
-            // that make the next attempt look like an already-registered login.
-            try {
-                await AuthData.deleteMany({ userId });
-                await UserSession.deleteOne({ userId });
-                console.log(`[PAIRING] Removed incomplete session data for ${phoneNumber}.`);
-            } catch (cleanupError) {
-                console.error(`[PAIRING] Cleanup failed for ${phoneNumber}:`, cleanupError.message);
             }
         }
 
@@ -1007,55 +963,33 @@ app.get('/api/admin/sessions', requireAdmin, async (req, res) => {
     } catch (error) { res.status(500).json({ success: false, error: error.message }); }
 });
 app.post('/api/admin/disconnect', requireAdmin, async (req, res) => {
-    const userId = String(req.body?.userId || '').trim();
-    if (!userId) {
-        return res.status(400).json({ success: false, error: 'A valid userId is required.' });
-    }
-
+    const userId = String(req.body?.userId || '');
     const entry = activeBots.get(userId);
     clearReconnectTimer(userId);
     reconnectAttempts.delete(userId);
     manuallyDisconnected.add(userId);
-
-    try {
-        // Stop this socket from writing credentials back to MongoDB. Wait for
-        // all writes already in progress before deleting the auth documents.
-        if (entry?.auth?.blockWritesAndFlush) {
-            await entry.auth.blockWritesAndFlush();
-        }
-
-        if (entry) {
-            activeBots.delete(userId);
-
-            try {
-                if (entry.user.ws && typeof entry.user.ws.close === 'function') {
-                    entry.user.ws.close();
-                } else if (typeof entry.user.end === 'function') {
-                    entry.user.end(new Error('Disconnected by owner'));
-                }
-            } catch (closeError) {
-                console.warn(`[ADMIN] Socket close warning for ${userId}:`, closeError.message);
-            }
-        }
-
-        const authDelete = await AuthData.deleteMany({ userId });
-        const sessionDelete = await UserSession.deleteOne({ userId });
+    if (!entry) {
         manuallyDisconnected.delete(userId);
+        await AuthData.deleteMany({ userId });
+        await UserSession.deleteOne({ userId });
+        return res.json({ success: true, message: 'Saved WhatsApp login removed. You can connect again with a new pairing code.' });
+    }
+    try {
+        // Prevent the close event from scheduling an automatic reconnect.
+        activeBots.delete(userId);
+        await updateConnectionStatus(userId, false);
+        if (entry.user.ws && typeof entry.user.ws.close === 'function') entry.user.ws.close();
+        else if (typeof entry.user.end === 'function') entry.user.end(new Error('Disconnected by owner'));
 
-        console.log(
-            `[ADMIN] Logout cleanup for ${userId}: deleted ${authDelete?.deletedCount ?? 0} auth record(s), session ${sessionDelete?.deletedCount ? 'removed' : 'not found'}.`
-        );
+        // Disconnect means log out fully: remove the old registered credentials
+        // so the same phone number can request a fresh pairing code immediately.
+        await AuthData.deleteMany({ userId });
+        await UserSession.deleteOne({ userId });
 
-        return res.json({
-            success: true,
-            message: 'WhatsApp disconnected and saved login removed. You can connect again with a new pairing code.',
-            deletedAuthRecords: authDelete?.deletedCount ?? 0,
-            deletedSession: Boolean(sessionDelete?.deletedCount)
-        });
+        res.json({ success: true, message: 'WhatsApp disconnected and saved login removed. You can connect again with a new pairing code.' });
     } catch (error) {
         manuallyDisconnected.delete(userId);
-        console.error(`[ADMIN] Disconnect cleanup failed for ${userId}:`, error.stack || error.message);
-        return res.status(500).json({ success: false, error: error.message || 'Could not remove the saved WhatsApp login.' });
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 
@@ -1287,6 +1221,23 @@ async function startServer() {
         }
     }, 60 * 60 * 1000); // 1 hour
 
+    // Graceful scheduled restart. The hosting supervisor must be configured to
+    // restart the process after a non-zero exit (Altare crash auto-recovery).
+    if (scheduledRestartTimeout) clearTimeout(scheduledRestartTimeout);
+    if (AUTO_RESTART_ENABLED) {
+        const restartDelay = AUTO_RESTART_MINUTES * 60 * 1000;
+        console.log(`[AUTO-RESTART] Enabled: graceful restart in ${AUTO_RESTART_MINUTES} minute(s).`);
+        scheduledRestartTimeout = setTimeout(() => {
+            console.log('[AUTO-RESTART] Scheduled restart starting; saving sessions first...');
+            shutdown('SCHEDULED_RESTART', 1).catch(error => {
+                console.error('[AUTO-RESTART] Graceful restart failed:', error.stack || error.message);
+                process.exit(1);
+            });
+        }, restartDelay);
+    } else {
+        console.log('[AUTO-RESTART] Disabled by AUTO_RESTART_ENABLED=false.');
+    }
+
     return httpServer;
 }
 
@@ -1294,7 +1245,7 @@ async function startServer() {
 // SAFE SHUTDOWN
 // ==================================================
 
-async function shutdown(signal) {
+async function shutdown(signal, exitCode = 0) {
     if (shuttingDown) return;
 
     shuttingDown = true;
@@ -1305,6 +1256,7 @@ async function shutdown(signal) {
 
     if (autoJoinInterval) clearInterval(autoJoinInterval);
     if (groupTimerInterval) clearInterval(groupTimerInterval);
+    if (scheduledRestartTimeout) clearTimeout(scheduledRestartTimeout);
 
     for (const timer of reconnectTimers.values()) {
         clearTimeout(timer);
@@ -1358,7 +1310,7 @@ async function shutdown(signal) {
 
     console.log('[SERVER] Shutdown complete.');
 
-    process.exit(0);
+    process.exit(exitCode);
 }
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));
