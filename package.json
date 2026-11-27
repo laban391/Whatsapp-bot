@@ -4,7 +4,7 @@
   "description": "Multi-user WhatsApp bot with MongoDB-backed isolated sessions",
   "main": "server.js",
   "scripts": {
-    "start": "node runner.js",
+    "start": "node server.js",
     "start:optimized": "node --max-old-space-size=768 server.js"
   },
   "keywords": [
