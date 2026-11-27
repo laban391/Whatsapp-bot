@@ -200,7 +200,7 @@ const pairingLocks = new Set();
 let httpServer = null;
 let shuttingDown = false;
 let autoJoinInterval = null; // 👈 Store the 1-hour timer
-let autoRestartTimer = null; // Temporary 5-minute restart test
+let autoRestartTimer = null; // 2-hour automatic restart
 
 // ==================================================
 // GENERAL HELPERS
@@ -1288,17 +1288,17 @@ async function startServer() {
         }
     }, 60 * 60 * 1000); // 1 hour
 
-    // TEMPORARY TEST: gracefully stop the process after 5 minutes.
-    // The hosting panel must be configured to restart exited processes.
+    // AUTOMATIC RESTART EVERY 2 HOURS.
+    // runner.js supervises this process and starts it again after shutdown.
     if (autoRestartTimer) clearTimeout(autoRestartTimer);
-    console.log('[AUTO-RESTART] 5-minute test timer activated.');
+    console.log('[AUTO-RESTART] 2-hour restart timer activated.');
     autoRestartTimer = setTimeout(() => {
-        console.log('[AUTO-RESTART] 5 minutes elapsed; beginning graceful shutdown for host restart.');
-        shutdown('AUTO-RESTART-TEST').catch(error => {
+        console.log('[AUTO-RESTART] 2 hours elapsed; beginning graceful shutdown.');
+        shutdown('AUTO-RESTART-2-HOURS').catch(error => {
             console.error('[AUTO-RESTART] Shutdown failed:', error.stack || error.message);
             process.exit(1);
         });
-    }, 5 * 60 * 1000);
+    }, 2 * 60 * 60 * 1000);
 
     return httpServer;
 }
