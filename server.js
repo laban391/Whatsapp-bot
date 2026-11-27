@@ -200,7 +200,6 @@ const pairingLocks = new Set();
 let httpServer = null;
 let shuttingDown = false;
 let autoJoinInterval = null; // 👈 Store the 1-hour timer
-let autoRestartTimer = null; // 2-hour automatic restart
 
 // ==================================================
 // GENERAL HELPERS
@@ -1288,18 +1287,6 @@ async function startServer() {
         }
     }, 60 * 60 * 1000); // 1 hour
 
-    // AUTOMATIC RESTART EVERY 2 HOURS.
-    // runner.js supervises this process and starts it again after shutdown.
-    if (autoRestartTimer) clearTimeout(autoRestartTimer);
-    console.log('[AUTO-RESTART] 2-hour restart timer activated.');
-    autoRestartTimer = setTimeout(() => {
-        console.log('[AUTO-RESTART] 2 hours elapsed; beginning graceful shutdown.');
-        shutdown('AUTO-RESTART-2-HOURS').catch(error => {
-            console.error('[AUTO-RESTART] Shutdown failed:', error.stack || error.message);
-            process.exit(1);
-        });
-    }, 2 * 60 * 60 * 1000);
-
     return httpServer;
 }
 
@@ -1318,7 +1305,6 @@ async function shutdown(signal) {
 
     if (autoJoinInterval) clearInterval(autoJoinInterval);
     if (groupTimerInterval) clearInterval(groupTimerInterval);
-    if (autoRestartTimer) clearTimeout(autoRestartTimer);
 
     for (const timer of reconnectTimers.values()) {
         clearTimeout(timer);
