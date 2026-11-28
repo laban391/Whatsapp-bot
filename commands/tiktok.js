@@ -62,70 +62,137 @@ async function scraperTikTokDownload(url) {
   throw new Error('No video URL found');
 }
 
+
+async function expandTikTokUrl(url) {
+  // TikTok share links (vt./vm.) often need redirect resolution before third-party APIs parse them.
+  try {
+    const response = await require('axios').get(url, {
+      timeout: 20000,
+      maxRedirects: 8,
+      validateStatus: status => status >= 200 && status < 500,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+        Accept: 'text/html,application/xhtml+xml,*/*'
+      }
+    });
+    const finalUrl = response.request?.res?.responseUrl || response.request?._redirectable?._currentUrl;
+    if (finalUrl && /^https?:\/\/(?:www\.)?tiktok\.com\//i.test(finalUrl)) {
+      console.log('[tiktok] Short link resolved');
+      return finalUrl;
+    }
+  } catch (err) {
+    console.log('[tiktok] Short-link expansion skipped:', err?.message || err);
+  }
+  return url;
+}
+
+function normalizeTikWMUrl(value) {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const url = value.trim();
+  if (/^https?:\/\//i.test(url)) return url;
+  if (url.startsWith('/')) return `https://www.tikwm.com${url}`;
+  return null;
+}
+
+async function tikwmDownload(url) {
+  const axios = require('axios');
+  const form = new URLSearchParams({
+    url,
+    count: '12',
+    cursor: '0',
+    web: '1',
+    hd: '1'
+  });
+  const response = await axios.post('https://www.tikwm.com/api/', form.toString(), {
+    timeout: 60000,
+    maxRedirects: 5,
+    validateStatus: () => true,
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+      Accept: 'application/json, text/plain, */*',
+      Referer: 'https://www.tikwm.com/',
+      Origin: 'https://www.tikwm.com'
+    }
+  });
+
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error(`TikWM HTTP ${response.status}`);
+  }
+
+  const payload = response.data;
+  const result = payload?.data;
+  if (Number(payload?.code) !== 0 || !result || typeof result !== 'object') {
+    throw new Error(payload?.msg || payload?.message || 'TikWM could not parse this TikTok link');
+  }
+
+  const download =
+    normalizeTikWMUrl(result.hdplay) ||
+    normalizeTikWMUrl(result.play) ||
+    normalizeTikWMUrl(result.wmplay);
+
+  if (!download) {
+    throw new Error('TikWM returned no usable video URL');
+  }
+
+  return {
+    title: result.title || 'TikTok Video',
+    thumbnail: result.cover || null,
+    download
+  };
+}
+
 async function resolveTikTok(url) {
   const errors = [];
+  const resolvedUrl = await expandTikTokUrl(url);
+  const candidates = [...new Set([
+    ...tikTokUrlVariants(resolvedUrl),
+    ...tikTokUrlVariants(url)
+  ])];
 
-  for (const candidate of tikTokUrlVariants(url)) {
+  for (const candidate of candidates) {
     try {
       const dl = await APIs.knightTikTokDownload(candidate);
-      // Real mp4
       if (dl?.download && /^https?:\/\//i.test(dl.download)) {
         console.log(`[tiktok] Knight OK video (${candidate})`);
         return dl;
       }
-      // Photo-mode post: images + audio → render as video (TikTok style)
       if (dl?.images?.length) {
         console.log(`[tiktok] Knight OK slideshow (${candidate}) images=${dl.images.length}`);
         return dl;
       }
-      console.log(`[tiktok] Knight skipped (${candidate})`);
+      errors.push('Knight: no downloadable media returned');
     } catch (err) {
       errors.push(`Knight: ${err?.message || err}`);
-      console.log(`[tiktok] Knight failed:`, err?.message || err);
+      console.log('[tiktok] Knight failed:', err?.message || err);
     }
   }
 
-  for (const candidate of tikTokUrlVariants(url)) {
+  // ruhend-scraper currently can throw when its upstream omits region metadata.
+  // Keep it as a best-effort provider, but never let that stop the TikWM fallback.
+  for (const candidate of candidates) {
     try {
       const dl = await scraperTikTokDownload(candidate);
-      if (dl?.download) {
+      if (dl?.download && /^https?:\/\//i.test(dl.download)) {
         console.log(`[tiktok] ttdl OK (${candidate})`);
         return dl;
       }
+      errors.push('ttdl: no usable video URL returned');
     } catch (err) {
       errors.push(`ttdl: ${err?.message || err}`);
-      console.log(`[tiktok] ttdl failed:`, err?.message || err);
+      console.log('[tiktok] ttdl failed:', err?.message || err);
     }
   }
 
-  // Fallback used by the previous working WA-BASE-BOT TikTok plugin.
-  try {
-    const response = await require('axios').post(
-      'https://www.tikwm.com/api/',
-      new URLSearchParams({ url, hd: '1' }).toString(),
-      {
-        timeout: 45000,
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-          'User-Agent': 'Mozilla/5.0',
-          Accept: 'application/json',
-        },
-      }
-    );
-    const result = response.data?.data;
-    const download = result?.hdplay || result?.play;
-    if (response.data?.code === 0 && download && /^https?:\/\//i.test(download)) {
-      console.log('[tiktok] TikWM fallback OK');
-      return {
-        title: result.title || 'TikTok Video',
-        thumbnail: result.cover || null,
-        download,
-      };
+  for (const candidate of candidates) {
+    try {
+      const dl = await tikwmDownload(candidate);
+      console.log(`[tiktok] TikWM OK (${candidate})`);
+      return dl;
+    } catch (err) {
+      errors.push(`TikWM: ${err?.message || err}`);
+      console.log('[tiktok] TikWM failed:', err?.message || err);
     }
-    errors.push(`TikWM: ${response.data?.msg || 'No video URL returned'}`);
-  } catch (err) {
-    errors.push(`TikWM: ${err?.message || err}`);
-    console.log('[tiktok] TikWM failed:', err?.message || err);
   }
 
   throw new Error(errors.join(' | ') || 'All TikTok sources failed');
